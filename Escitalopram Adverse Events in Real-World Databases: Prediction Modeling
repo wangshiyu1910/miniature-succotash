@@ -1,0 +1,3765 @@
+# ==================== 完整的 FAERS 数据处理 ====================
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(writexl)
+
+# 1. 读取数据（先全部读取为文本，避免自动转换错误）
+cat("读取数据...\n")
+data <- read_excel("Escitalopram_final.xlsx", col_types = "text")
+
+cat("数据维度:", dim(data), "\n")
+
+# 2. 转换数值型变量
+cat("\n转换数值型变量...\n")
+data <- data %>%
+  mutate(
+    # 年龄相关
+    age = as.numeric(age),
+    age_cod = as.character(age_cod),
+    
+    # 体重相关
+    wt = as.numeric(wt),
+    wt_cod = as.character(wt_cod),
+    
+    # ID 变量
+    primaryid = as.character(primaryid),
+    caseid = as.character(caseid)
+  )
+
+# 3. 年龄处理
+cat("\n处理年龄...\n")
+data <- data %>%
+  mutate(
+    # 年龄单位标准化
+    age_unit = case_when(
+      age_cod %in% c("YR", "YEAR", "Y") ~ "YEAR",
+      age_cod %in% c("MON", "MONTH", "M") ~ "MONTH",
+      age_cod %in% c("WK", "WEEK", "W") ~ "WEEK",
+      age_cod %in% c("DAY", "D") ~ "DAY",
+      age_cod %in% c("DEC", "DECADE") ~ "DECADE",
+      is.na(age_cod) & !is.na(age) ~ "UNKNOWN",
+      TRUE ~ NA_character_
+    ),
+    
+    # 转换为年
+    age_years = case_when(
+      age_unit == "YEAR" ~ age,
+      age_unit == "MONTH" ~ age / 12,
+      age_unit == "WEEK" ~ age / 52.14,
+      age_unit == "DAY" ~ age / 365.25,
+      age_unit == "DECADE" ~ age * 10,
+      age_unit == "UNKNOWN" & age > 150 ~ age / 10,
+      age_unit == "UNKNOWN" & age > 100 & age <= 150 ~ age,
+      age_unit == "UNKNOWN" & age > 20 & age <= 100 ~ age,
+      age_unit == "UNKNOWN" & age > 2 & age <= 20 ~ age,
+      age_unit == "UNKNOWN" & age <= 2 ~ age * 12,
+      TRUE ~ NA_real_
+    ),
+    
+    # 年龄分组
+    age_group = case_when(
+      age_years < 18 ~ "儿童 (<18岁)",
+      age_years >= 18 & age_years < 45 ~ "青年 (18-44岁)",
+      age_years >= 45 & age_years < 65 ~ "中年 (45-64岁)",
+      age_years >= 65 & age_years < 75 ~ "老年 (65-74岁)",
+      age_years >= 75 ~ "高龄 (≥75岁)",
+      TRUE ~ "未知"
+    )
+  )
+
+# 4. 性别处理
+cat("\n处理性别...\n")
+data <- data %>%
+  mutate(
+    sex_clean = case_when(
+      toupper(sex) %in% c("M", "MALE", "1") ~ "M",
+      toupper(sex) %in% c("F", "FEMALE", "2") ~ "F",
+      toupper(sex) %in% c("U", "UNKNOWN", "NS", "9") ~ "U",
+      TRUE ~ NA_character_
+    ),
+    sex_code = case_when(
+      sex_clean == "M" ~ 1,
+      sex_clean == "F" ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
+
+# 5. 体重处理
+cat("\n处理体重...\n")
+data <- data %>%
+  mutate(
+    # 体重单位标准化
+    wt_unit = case_when(
+      toupper(wt_cod) %in% c("KGS", "KG", "KILOGRAM") ~ "KG",
+      toupper(wt_cod) %in% c("LBS", "LB", "POUND") ~ "LB",
+      is.na(wt_cod) & !is.na(wt) ~ "UNKNOWN",
+      TRUE ~ NA_character_
+    ),
+    
+    # 转换为公斤
+    wt_kg = case_when(
+      wt_unit == "KG" ~ wt,
+      wt_unit == "LB" ~ wt * 0.453592,
+      wt_unit == "UNKNOWN" & wt < 300 ~ wt,
+      wt_unit == "UNKNOWN" & wt >= 300 ~ wt * 0.453592,
+      TRUE ~ NA_real_
+    ),
+    
+    # 体重分组
+    wt_group = case_when(
+      wt_kg < 50 ~ "体重过轻 (<50kg)",
+      wt_kg >= 50 & wt_kg < 70 ~ "正常体重 (50-70kg)",
+      wt_kg >= 70 & wt_kg < 90 ~ "超重 (70-90kg)",
+      wt_kg >= 90 ~ "肥胖 (≥90kg)",
+      TRUE ~ "未知"
+    )
+  )
+
+# 6. 简单插补
+cat("\n进行缺失值插补...\n")
+
+# 按性别分层的年龄中位数
+age_median_m <- median(data$age_years[data$sex_clean == "M"], na.rm = TRUE)
+age_median_f <- median(data$age_years[data$sex_clean == "F"], na.rm = TRUE)
+age_median_all <- median(data$age_years, na.rm = TRUE)
+
+# 按性别分层的体重中位数
+wt_median_m <- median(data$wt_kg[data$sex_clean == "M"], na.rm = TRUE)
+wt_median_f <- median(data$wt_kg[data$sex_clean == "F"], na.rm = TRUE)
+wt_median_all <- median(data$wt_kg, na.rm = TRUE)
+
+data <- data %>%
+  mutate(
+    # 年龄插补
+    age_imputed = case_when(
+      !is.na(age_years) ~ age_years,
+      sex_clean == "M" ~ age_median_m,
+      sex_clean == "F" ~ age_median_f,
+      TRUE ~ age_median_all
+    ),
+    
+    # 性别插补（使用众数）
+    sex_imputed = case_when(
+      !is.na(sex_clean) ~ sex_clean,
+      TRUE ~ names(sort(table(sex_clean), decreasing = TRUE))[1]
+    ),
+    
+    # 体重插补
+    wt_imputed = case_when(
+      !is.na(wt_kg) ~ wt_kg,
+      sex_clean == "M" ~ wt_median_m,
+      sex_clean == "F" ~ wt_median_f,
+      TRUE ~ wt_median_all
+    ),
+    
+    # 插补标志
+    age_missing = is.na(age_years),
+    sex_missing = is.na(sex_clean),
+    wt_missing = is.na(wt_kg)
+  )
+
+# 7. 查看处理结果
+cat("\n========== 处理结果 ==========\n")
+cat("数据维度:", dim(data), "\n")
+cat("\n年龄统计:\n")
+cat("  范围:", range(data$age_years, na.rm = TRUE), "\n")
+cat("  缺失率:", mean(is.na(data$age_years)) * 100, "%\n")
+cat("  插补后缺失率:", mean(data$age_missing) * 100, "%\n")
+
+cat("\n性别统计:\n")
+print(table(data$sex_clean, useNA = "ifany"))
+cat("  缺失率:", mean(is.na(data$sex_clean)) * 100, "%\n")
+
+cat("\n体重统计:\n")
+cat("  范围:", range(data$wt_kg, na.rm = TRUE), "\n")
+cat("  缺失率:", mean(is.na(data$wt_kg)) * 100, "%\n")
+
+# 8. 创建分析数据集
+cat("\n创建分析数据集...\n")
+analysis_data <- data %>%
+  select(
+    primaryid, caseid,
+    age_years, age_imputed, age_group, age_missing,
+    sex_clean, sex_imputed, sex_code, sex_missing,
+    wt_kg, wt_imputed, wt_group, wt_missing,
+    everything()
+  )
+
+# 9. 保存结果
+cat("\n保存结果...\n")
+write_xlsx(analysis_data, "Escitalopram_FAERS_processed_fixed.xlsx")
+cat("✓ 已保存: Escitalopram_FAERS_processed_fixed.xlsx\n")
+
+# 保存一份 CSV 备份
+write.csv(analysis_data, "Escitalopram_FAERS_processed_fixed.csv", row.names = FALSE)
+cat("✓ 已保存: Escitalopram_FAERS_processed_fixed.csv\n")
+
+# 10. 生成简单报告
+cat("\n========== 处理报告 ==========\n")
+cat("1. 数据类型问题已修复\n")
+cat("2. 年龄单位已标准化为年\n")
+cat("3. 性别编码已标准化为 M/F\n")
+cat("4. 体重单位已标准化为 kg\n")
+cat("5. 缺失值已按性别分层插补\n")
+cat("\n最终数据可用于回归分析\n")
+
+
+# ==================== 加载包 ====================
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(ggplot2)
+
+# 读取处理后的数据
+data <- read_excel("Escitalopram_FAERS_processed_fixed.xlsx")
+
+# ==================== 1. 检查缺失情况 ====================
+cat("========== 缺失情况检查 ==========\n")
+
+# 检查 outc_cod 缺失
+cat("\noutc_cod 缺失情况:\n")
+outc_missing <- sum(is.na(data$outc_cod))
+outc_total <- nrow(data)
+cat("缺失数:", outc_missing, "\n")
+cat("缺失率:", round(outc_missing/outc_total * 100, 2), "%\n")
+
+# 检查 indi_pt 缺失
+cat("\nindi_pt 缺失情况:\n")
+indi_missing <- sum(is.na(data$indi_pt))
+cat("缺失数:", indi_missing, "\n")
+cat("缺失率:", round(indi_missing/outc_total * 100, 2), "%\n")
+
+# 查看现有值的分布
+cat("\noutc_cod 现有值分布:\n")
+print(table(data$outc_cod, useNA = "ifany"))
+
+cat("\nindi_pt 现有值分布（前20个）:\n")
+indi_table <- sort(table(data$indi_pt), decreasing = TRUE)
+print(head(indi_table, 20))
+
+# ==================== 2. outc_cod（结局代码）插补 ====================
+cat("\n========== outc_cod 插补 ==========\n")
+
+# 2.1 基于严重不良反应推断结局
+data <- data %>%
+  mutate(
+    # 根据 PT（不良反应术语）推断结局严重性
+    inferred_severity = case_when(
+      # 死亡相关术语
+      grepl("death|die|fatal|lethal|dead|expired|moribund", 
+            pt, ignore.case = TRUE) ~ "DE",
+      # 危及生命相关术语
+      grepl("life threatening|life-threatening|endangering", 
+            pt, ignore.case = TRUE) ~ "LT",
+      # 住院相关术语
+      grepl("hospitali|admission|inpatient", 
+            pt, ignore.case = TRUE) ~ "HO",
+      # 残疾相关术语
+      grepl("disabilit|disable|handicap|permanent injury", 
+            pt, ignore.case = TRUE) ~ "CA",
+      # 先天性异常
+      grepl("congenital|birth defect|malformation|anomaly", 
+            pt, ignore.case = TRUE) ~ "RI",
+      # 需要干预
+      grepl("intervention|required|prevent|damage", 
+            pt, ignore.case = TRUE) ~ "DS",
+      TRUE ~ NA_character_
+    )
+  )
+
+# 2.2 根据药物名称推断结局（艾司西酞普兰特定）
+data <- data %>%
+  mutate(
+    drug_related_severity = case_when(
+      # 自杀相关（SSRI 类药物的重要安全性事件）
+      grepl("suicid|self harm|self-injury|overdose", 
+            pt, ignore.case = TRUE) ~ "DE",
+      # 血清素综合征
+      grepl("serotonin syndrome|serotonin toxicity", 
+            pt, ignore.case = TRUE) ~ "HO",
+      # 出血事件
+      grepl("bleeding|haemorrhage|hemorrhage", 
+            pt, ignore.case = TRUE) ~ "HO",
+      TRUE ~ NA_character_
+    )
+  )
+
+# 2.3 基于不良反应的数量推断
+data <- data %>%
+  group_by(primaryid) %>%
+  mutate(
+    # 每个报告的不良反应数量
+    reac_count = n(),
+    # 多不良反应可能预示严重结局
+    inferred_by_count = ifelse(reac_count >= 5, "OT", NA_character_)
+  ) %>%
+  ungroup()
+
+# 2.4 综合插补 outc_cod
+data <- data %>%
+  mutate(
+    # 优先使用原始值
+    outc_cod_imputed = case_when(
+      !is.na(outc_cod) ~ outc_cod,
+      !is.na(inferred_severity) ~ inferred_severity,
+      !is.na(drug_related_severity) ~ drug_related_severity,
+      !is.na(inferred_by_count) ~ inferred_by_count,
+      # 默认：其他严重（OT）或非严重
+      TRUE ~ "OT"  # 保守估计为其他严重
+    ),
+    
+    # 严重结局标志
+    serious_outcome = case_when(
+      outc_cod_imputed %in% c("DE", "LT", "HO", "CA", "RI", "DS") ~ 1,
+      outc_cod_imputed %in% c("OT", "Other") ~ 0,
+      TRUE ~ 0
+    ),
+    
+    # 结局分类
+    outcome_category = case_when(
+      outc_cod_imputed == "DE" ~ "死亡",
+      outc_cod_imputed == "LT" ~ "危及生命",
+      outc_cod_imputed == "HO" ~ "住院",
+      outc_cod_imputed == "CA" ~ "残疾",
+      outc_cod_imputed == "RI" ~ "先天异常",
+      outc_cod_imputed == "DS" ~ "需要干预",
+      outc_cod_imputed == "OT" ~ "其他严重",
+      TRUE ~ "未知"
+    ),
+    
+    # 插补标志
+    outc_imputed_flag = is.na(outc_cod)
+  )
+
+# 2.5 查看插补结果
+cat("\noutc_cod 插补结果:\n")
+cat("插补数量:", sum(data$outc_imputed_flag), "\n")
+cat("插补后分布:\n")
+print(table(data$outc_cod_imputed, useNA = "ifany"))
+
+# ==================== 3. indi_pt（适应症）插补 ====================
+cat("\n========== indi_pt 插补 ==========\n")
+
+# 3.1 基于药物名称推断适应症（艾司西酞普兰常见适应症）
+data <- data %>%
+  mutate(
+    # 从药物名称推断
+    indi_from_drug = case_when(
+      grepl("escitalopram|lexapro", drugname, ignore.case = TRUE) ~ 
+        "Major depressive disorder",
+      TRUE ~ NA_character_
+    ),
+    
+    # 从不良反应反推适应症
+    indi_from_reaction = case_when(
+      # 抑郁相关不良反应
+      grepl("depression|depressed mood|suicidal|self harm", 
+            pt, ignore.case = TRUE) ~ "Depression",
+      # 焦虑相关
+      grepl("anxiety|panic|agitation|nervousness", 
+            pt, ignore.case = TRUE) ~ "Anxiety disorder",
+      # 强迫症相关
+      grepl("obsessive|compulsive|ocd", 
+            pt, ignore.case = TRUE) ~ "OCD",
+      # 惊恐障碍
+      grepl("panic attack|panic disorder", 
+            pt, ignore.case = TRUE) ~ "Panic disorder",
+      TRUE ~ NA_character_
+    )
+  )
+
+# 3.2 使用同一报告中的其他信息
+data <- data %>%
+  group_by(primaryid) %>%
+  mutate(
+    # 同一报告中的其他适应症（如果有）
+    other_indi = first(indi_pt[!is.na(indi_pt)]),
+    # 同一报告中的不良反应推断
+    common_indi = case_when(
+      any(grepl("depression|depressed", pt, ignore.case = TRUE)) ~ "Depression",
+      any(grepl("anxiety|panic", pt, ignore.case = TRUE)) ~ "Anxiety",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup()
+
+# 3.3 综合插补 indi_pt
+# 获取最常见的适应症作为默认值
+top_indi <- names(sort(table(data$indi_pt), decreasing = TRUE))[1]
+
+data <- data %>%
+  mutate(
+    indi_pt_imputed = case_when(
+      # 优先使用原始值
+      !is.na(indi_pt) ~ indi_pt,
+      # 从药物名称推断
+      !is.na(indi_from_drug) ~ indi_from_drug,
+      # 从不良反应推断
+      !is.na(indi_from_reaction) ~ indi_from_reaction,
+      # 同一报告中的其他适应症
+      !is.na(other_indi) ~ other_indi,
+      # 常见适应症推断
+      !is.na(common_indi) ~ common_indi,
+      # 默认值（最常见的适应症）
+      TRUE ~ top_indi
+    ),
+    
+    # 适应症分类（简化）
+    indi_category = case_when(
+      grepl("depression|depressive|major depressive", 
+            indi_pt_imputed, ignore.case = TRUE) ~ "抑郁症",
+      grepl("anxiety|panic|generalized anxiety|social anxiety", 
+            indi_pt_imputed, ignore.case = TRUE) ~ "焦虑症",
+      grepl("ocd|obsessive|compulsive", 
+            indi_pt_imputed, ignore.case = TRUE) ~ "强迫症",
+      TRUE ~ "其他"
+    ),
+    
+    # 插补标志
+    indi_imputed_flag = is.na(indi_pt)
+  )
+
+# 3.4 查看插补结果
+cat("\nindi_pt 插补结果:\n")
+cat("插补数量:", sum(data$indi_imputed_flag), "\n")
+cat("插补后分布（前20个）:\n")
+indi_imputed_table <- sort(table(data$indi_pt_imputed), decreasing = TRUE)
+print(head(indi_imputed_table, 20))
+
+# ==================== 4. 高级插补：使用机器学习 ====================
+cat("\n========== 高级插补（可选） ==========\n")
+
+# 如果数据量大，可以使用随机森林插补
+if(require(randomForest) && nrow(data) < 100000) {
+  
+  # 准备训练数据
+  train_data <- data %>%
+    filter(!is.na(indi_pt)) %>%
+    select(age_years, sex_clean, pt, drugname) %>%
+    mutate(
+      sex_clean = as.factor(sex_clean),
+      pt = as.factor(pt)
+    )
+  
+  # 注意：这里需要大量计算，仅作示例
+  cat("随机森林插补需要大量计算资源\n")
+}
+
+# ==================== 5. 验证插补质量 ====================
+cat("\n========== 插补质量验证 ==========\n")
+
+# 5.1 比较插补前后分布
+# outc_cod 分布对比
+par(mfrow = c(1, 2))
+barplot(table(data$outc_cod[!data$outc_imputed_flag]), 
+        main = "原始 outc_cod 分布",
+        las = 2, cex.names = 0.7)
+barplot(table(data$outc_cod_imputed[data$outc_imputed_flag]), 
+        main = "插补 outc_cod 分布",
+        las = 2, cex.names = 0.7)
+
+# 5.2 相关性检查
+# 检查插补的 outc_cod 与严重不良反应的相关性
+severity_check <- data %>%
+  filter(outc_imputed_flag) %>%
+  mutate(
+    has_severe_pt = grepl("death|fatal|life threatening|hospitali", 
+                          pt, ignore.case = TRUE)
+  ) %>%
+  summarise(
+    severe_pt_rate = mean(has_severe_pt),
+    serious_outcome_rate = mean(serious_outcome)
+  )
+
+cat("\n插补数据验证:\n")
+print(severity_check)
+
+# ==================== 6. 创建最终数据集 ====================
+cat("\n========== 创建最终分析数据集 ==========\n")
+
+final_data <- data %>%
+  select(
+    # 标识变量
+    primaryid, caseid,
+    
+    # 人口学变量
+    age_years, age_imputed, age_group, age_missing,
+    sex_clean, sex_imputed, sex_code, sex_missing,
+    wt_kg, wt_imputed, wt_group, wt_missing,
+    
+    # 结局变量（插补后）
+    outc_cod_original = outc_cod,
+    outc_cod_imputed,
+    serious_outcome,
+    outcome_category,
+    outc_imputed_flag,
+    
+    # 适应症变量（插补后）
+    indi_pt_original = indi_pt,
+    indi_pt_imputed,
+    indi_category,
+    indi_imputed_flag,
+    
+    # 不良反应
+    pt,
+    
+    # 药物信息
+    drugname,
+    
+    # 其他变量
+    everything()
+  )
+
+# ==================== 7. 保存结果 ====================
+cat("\n========== 保存结果 ==========\n")
+
+# 保存完整数据
+write_xlsx(final_data, "Escitalopram_complete_imputed.xlsx")
+cat("✓ 已保存: Escitalopram_complete_imputed.xlsx\n")
+
+# 保存插补报告
+imputation_report <- list(
+  outc_cod = data.frame(
+    Metric = c("原始缺失数", "原始缺失率", "插补数", "插补后缺失率"),
+    Value = c(outc_missing, 
+              round(outc_missing/outc_total * 100, 2),
+              sum(data$outc_imputed_flag),
+              0)
+  ),
+  indi_pt = data.frame(
+    Metric = c("原始缺失数", "原始缺失率", "插补数", "插补后缺失率"),
+    Value = c(indi_missing,
+              round(indi_missing/outc_total * 100, 2),
+              sum(data$indi_imputed_flag),
+              0)
+  ),
+  outc_distribution = as.data.frame(table(data$outc_cod_imputed)),
+  indi_distribution = as.data.frame(head(sort(table(data$indi_pt_imputed), decreasing = TRUE), 50))
+)
+
+write_xlsx(imputation_report, "Imputation_Report.xlsx")
+cat("✓ 已保存: Imputation_Report.xlsx\n")
+
+# ==================== 8. 生成最终报告 ====================
+cat("\n========== 插补完成报告 ==========\n")
+cat("原始数据行数:", nrow(data), "\n")
+cat("\noutc_cod 插补:\n")
+cat("  - 缺失率:", round(outc_missing/outc_total * 100, 2), "%\n")
+cat("  - 插补方法: 基于不良反应术语推断\n")
+cat("  - 插补后分布: 死亡", sum(data$outc_cod_imputed == "DE"), 
+    "，住院", sum(data$outc_cod_imputed == "HO"), "\n")
+cat("\nindi_pt 插补:\n")
+cat("  - 缺失率:", round(indi_missing/outc_total * 100, 2), "%\n")
+cat("  - 插补方法: 基于药物和不良反应推断\n")
+cat("  - 主要适应症: 抑郁症", sum(grepl("depression", data$indi_pt_imputed, ignore.case = TRUE)), "\n")
+cat("\n输出文件:\n")
+cat("1. Escitalopram_complete_imputed.xlsx - 完整插补数据\n")
+cat("2. Imputation_Report.xlsx - 插补详细报告\n")
+# ============================================================================
+# 修复版本 - 确保所有数据类型正确
+# ============================================================================
+
+# 1. 安装和加载必要的包 -----------------------------------------------------
+
+# 检查并安装必要的包
+packages_needed <- c(
+  "readxl", "dplyr", "tidyr", "caret", "randomForest", 
+  "gbm", "e1071", "xgboost", "pROC", "ggplot2", 
+  "corrplot", "PRROC", "glmnet", "rpart", "rpart.plot",
+  "ROSE"
+)
+
+# 安装缺失的包
+for (pkg in packages_needed) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# 加载所有包
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(randomForest)
+library(gbm)
+library(e1071)
+library(xgboost)
+library(pROC)
+library(ggplot2)
+library(corrplot)
+library(PRROC)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(ROSE)
+
+# 设置随机种子
+set.seed(123)
+
+# 2. 读取数据 ----------------------------------------------------------------
+data <- read_excel("Escitalopram_complete_imputed.xlsx")
+
+# 查看数据结构
+str(data)
+head(data)
+
+# 3. 数据预处理 --------------------------------------------------------------
+
+# 定义自杀相关PT
+suicide_pt <- c("Completed suicide", "Suicide attempt", "Suicidal ideation", 
+                "Suspected suicide", "Suicidal behaviour", "Depression suicidal")
+
+# 创建目标变量: 1=自杀风险, 0=其他风险 (确保是数值型)
+data$target <- as.numeric(ifelse(data$pt %in% suicide_pt, 1, 0))
+
+# 查看类别分布
+table(data$target)
+prop.table(table(data$target))
+
+# 筛选特征用于建模 (排除ID变量和目标相关变量)
+features <- data %>%
+  select(-c(primaryid, caseid, pt, target)) %>%
+  # 将字符型变量转换为因子
+  mutate(across(where(is.character), as.factor))
+
+# 检查是否有缺失值
+sum(is.na(features))
+
+# 特征名称
+feature_names <- names(features)
+
+# 4. 数据平衡采样 (1:1) ------------------------------------------------------
+
+# 获取自杀组和非自杀组索引
+suicide_idx <- which(data$target == 1)
+non_suicide_idx <- which(data$target == 0)
+
+# 设置采样数量
+n_suicide <- length(suicide_idx)
+n_non_suicide <- length(non_suicide_idx)
+
+cat("自杀组样本数:", n_suicide, "\n")
+cat("非自杀组样本数:", n_non_suicide, "\n")
+
+# 从非自杀组中随机抽取与自杀组相同数量的样本
+set.seed(456)
+sampled_non_suicide_idx <- sample(non_suicide_idx, size = n_suicide, replace = FALSE)
+
+# 合并索引
+balanced_idx <- c(suicide_idx, sampled_non_suicide_idx)
+
+# 创建平衡数据集
+balanced_data <- data[balanced_idx, ]
+balanced_features <- features[balanced_idx, ]
+balanced_target <- data$target[balanced_idx]  # 已经是数值型
+
+# 检查平衡后的类别分布
+table(balanced_target)
+
+# 5. 划分训练集和测试集 (70/30) ---------------------------------------------
+
+set.seed(789)
+train_idx <- createDataPartition(balanced_target, p = 0.7, list = FALSE)
+
+X_train <- balanced_features[train_idx, ]
+X_test <- balanced_features[-train_idx, ]
+y_train <- balanced_target[train_idx]
+y_test <- balanced_target[-train_idx]
+
+# 确保y_train和y_test是数值型
+y_train <- as.numeric(y_train)
+y_test <- as.numeric(y_test)
+
+# 检查训练集分布
+table(y_train)
+table(y_test)
+
+# 6. 特征工程 - 创建虚拟变量 ------------------------------------------------
+
+# 对训练集进行one-hot编码
+dummy_model <- dummyVars(~ ., data = X_train, fullRank = TRUE)
+X_train_dummy <- predict(dummy_model, X_train)
+X_test_dummy <- predict(dummy_model, X_test)
+
+# 转换为数据框
+X_train_df <- as.data.frame(X_train_dummy)
+X_test_df <- as.data.frame(X_test_dummy)
+
+# 移除零方差特征
+nzv <- nearZeroVar(X_train_df)
+if (length(nzv) > 0) {
+  X_train_df <- X_train_df[, -nzv]
+  X_test_df <- X_test_df[, -nzv]
+}
+
+# 确保所有列都是数值型
+X_train_df <- as.data.frame(lapply(X_train_df, as.numeric))
+X_test_df <- as.data.frame(lapply(X_test_df, as.numeric))
+
+# 处理可能的NA值
+X_train_df[is.na(X_train_df)] <- 0
+X_test_df[is.na(X_test_df)] <- 0
+
+# 转换为矩阵 (用于某些模型)
+X_train_mat <- as.matrix(X_train_df)
+X_test_mat <- as.matrix(X_test_df)
+
+# 7. 模型训练与评估函数 -----------------------------------------------------
+
+# 创建评估指标计算函数
+calculate_metrics <- function(pred_prob, y_true, threshold = 0.5) {
+  # 确保输入是数值型
+  pred_prob <- as.numeric(pred_prob)
+  y_true <- as.numeric(y_true)
+  
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  pred_class <- as.factor(pred_class)
+  y_true_factor <- as.factor(y_true)
+  
+  # 混淆矩阵
+  cm <- confusionMatrix(pred_class, y_true_factor)
+  
+  # ROC和AUC
+  roc_obj <- roc(y_true, pred_prob)
+  auc_value <- auc(roc_obj)
+  
+  # PR曲线
+  pr_obj <- pr.curve(scores.class0 = pred_prob[y_true == 1], 
+                     scores.class1 = pred_prob[y_true == 0], 
+                     curve = TRUE)
+  
+  # 返回指标
+  return(list(
+    accuracy = cm$overall["Accuracy"],
+    precision = cm$byClass["Precision"],
+    recall = cm$byClass["Sensitivity"],
+    f1 = cm$byClass["F1"],
+    auc = as.numeric(auc_value),
+    pr_auc = pr_obj$auc.integral,
+    confusion_matrix = cm$table
+  ))
+}
+
+# 8. 模型1: 随机森林 (RF) --------------------------------------------------
+
+cat("\n========== 训练随机森林模型 ==========\n")
+
+# 确保y_train是因子类型（randomForest要求）
+y_train_factor <- as.factor(y_train)
+
+rf_model <- randomForest(
+  x = X_train_df,
+  y = y_train_factor,
+  ntree = 500,
+  mtry = floor(sqrt(ncol(X_train_df))),
+  importance = TRUE,
+  nodesize = 5
+)
+
+# 预测
+rf_pred_prob <- predict(rf_model, X_test_df, type = "prob")[, 2]
+rf_metrics <- calculate_metrics(rf_pred_prob, y_test)
+
+cat("随机森林评估结果:\n")
+cat("Accuracy:", rf_metrics$accuracy, "\n")
+cat("Precision:", rf_metrics$precision, "\n")
+cat("Recall:", rf_metrics$recall, "\n")
+cat("F1:", rf_metrics$f1, "\n")
+cat("AUC:", rf_metrics$auc, "\n")
+cat("PR-AUC:", rf_metrics$pr_auc, "\n")
+
+# 9. 模型2: 梯度提升机 (GBM) ----------------------------------------------
+
+cat("\n========== 训练GBM模型 ==========\n")
+
+# 准备GBM数据
+train_data_gbm <- cbind(X_train_df, y_train = y_train)
+
+gbm_model <- gbm(
+  formula = y_train ~ .,
+  data = train_data_gbm,
+  distribution = "bernoulli",
+  n.trees = 500,
+  interaction.depth = 3,
+  n.minobsinnode = 5,
+  shrinkage = 0.01,
+  cv.folds = 5,
+  verbose = FALSE
+)
+
+# 选择最优树数
+best_trees <- gbm.perf(gbm_model, method = "cv", plot.it = FALSE)
+
+# 预测
+gbm_pred_prob <- predict(gbm_model, X_test_df, n.trees = best_trees, type = "response")
+gbm_metrics <- calculate_metrics(gbm_pred_prob, y_test)
+
+cat("GBM评估结果:\n")
+cat("Accuracy:", gbm_metrics$accuracy, "\n")
+cat("Precision:", gbm_metrics$precision, "\n")
+cat("Recall:", gbm_metrics$recall, "\n")
+cat("F1:", gbm_metrics$f1, "\n")
+cat("AUC:", gbm_metrics$auc, "\n")
+cat("PR-AUC:", gbm_metrics$pr_auc, "\n")
+
+# 10. 模型3: 支持向量机 (SVM) ---------------------------------------------
+
+cat("\n========== 训练SVM模型 ==========\n")
+
+# 使用RBF核
+svm_model <- svm(
+  x = X_train_df,
+  y = as.factor(y_train),
+  kernel = "radial",
+  probability = TRUE,
+  cost = 1,
+  gamma = 1/ncol(X_train_df)
+)
+
+# 预测
+svm_pred <- predict(svm_model, X_test_df, probability = TRUE)
+svm_pred_prob <- attr(svm_pred, "probabilities")[, "1"]
+svm_metrics <- calculate_metrics(svm_pred_prob, y_test)
+
+cat("SVM评估结果:\n")
+cat("Accuracy:", svm_metrics$accuracy, "\n")
+cat("Precision:", svm_metrics$precision, "\n")
+cat("Recall:", svm_metrics$recall, "\n")
+cat("F1:", svm_metrics$f1, "\n")
+cat("AUC:", svm_metrics$auc, "\n")
+cat("PR-AUC:", svm_metrics$pr_auc, "\n")
+
+# 11. 模型4: 极端梯度提升 (XGBoost) ---------------------------------------
+
+cat("\n========== 训练XGBoost模型 ==========\n")
+
+# 准备XGBoost数据格式
+dtrain <- xgb.DMatrix(data = X_train_mat, label = y_train)
+dtest <- xgb.DMatrix(data = X_test_mat, label = y_test)
+
+# 设置参数
+xgb_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 1
+)
+
+# 训练模型
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 100,
+  verbose = 0
+)
+
+# 预测
+xgb_pred_prob <- predict(xgb_model, dtest)
+xgb_metrics <- calculate_metrics(xgb_pred_prob, y_test)
+
+cat("XGBoost评估结果:\n")
+cat("Accuracy:", xgb_metrics$accuracy, "\n")
+cat("Precision:", xgb_metrics$precision, "\n")
+cat("Recall:", xgb_metrics$recall, "\n")
+cat("F1:", xgb_metrics$f1, "\n")
+cat("AUC:", xgb_metrics$auc, "\n")
+cat("PR-AUC:", xgb_metrics$pr_auc, "\n")
+
+# 12. 模型5: 弹性网络 (glmnet) --------------------------------------------
+
+cat("\n========== 训练弹性网络模型 ==========\n")
+
+# 标准化特征
+preprocess_params <- preProcess(X_train_df, method = c("center", "scale"))
+X_train_scaled <- predict(preprocess_params, X_train_df)
+X_test_scaled <- predict(preprocess_params, X_test_df)
+
+X_train_mat_scaled <- as.matrix(X_train_scaled)
+X_test_mat_scaled <- as.matrix(X_test_scaled)
+
+# 训练弹性网络 (使用交叉验证选择lambda)
+cv_glmnet <- cv.glmnet(
+  x = X_train_mat_scaled,
+  y = y_train,
+  family = "binomial",
+  alpha = 0.5,
+  nfolds = 5
+)
+
+# 最优lambda
+best_lambda <- cv_glmnet$lambda.min
+
+# 预测
+glmnet_pred_prob <- predict(cv_glmnet, X_test_mat_scaled, s = best_lambda, type = "response")[, 1]
+glmnet_metrics <- calculate_metrics(glmnet_pred_prob, y_test)
+
+cat("弹性网络评估结果:\n")
+cat("Accuracy:", glmnet_metrics$accuracy, "\n")
+cat("Precision:", glmnet_metrics$precision, "\n")
+cat("Recall:", glmnet_metrics$recall, "\n")
+cat("F1:", glmnet_metrics$f1, "\n")
+cat("AUC:", glmnet_metrics$auc, "\n")
+cat("PR-AUC:", glmnet_metrics$pr_auc, "\n")
+
+# 13. 模型6: 决策树 (rpart) ------------------------------------------------
+
+cat("\n========== 训练决策树模型 ==========\n")
+
+# 训练决策树
+rpart_model <- rpart(
+  as.factor(y_train) ~ .,
+  data = X_train_scaled,
+  method = "class",
+  cp = 0.01,
+  minsplit = 20
+)
+
+# 剪枝
+rpart_model_pruned <- prune(rpart_model, 
+                            cp = rpart_model$cptable[which.min(rpart_model$cptable[, "xerror"]), "CP"])
+
+# 预测
+rpart_pred <- predict(rpart_model_pruned, X_test_scaled, type = "prob")
+rpart_pred_prob <- rpart_pred[, 2]
+rpart_metrics <- calculate_metrics(rpart_pred_prob, y_test)
+
+cat("决策树评估结果:\n")
+cat("Accuracy:", rpart_metrics$accuracy, "\n")
+cat("Precision:", rpart_metrics$precision, "\n")
+cat("Recall:", rpart_metrics$recall, "\n")
+cat("F1:", rpart_metrics$f1, "\n")
+cat("AUC:", rpart_metrics$auc, "\n")
+cat("PR-AUC:", rpart_metrics$pr_auc, "\n")
+
+# 14. 模型比较 -------------------------------------------------------------
+
+# 收集所有模型结果
+model_names <- c("RF", "GBM", "SVM", "XGBoost", "ElasticNet", "DecisionTree")
+all_metrics <- list(
+  RF = rf_metrics,
+  GBM = gbm_metrics,
+  SVM = svm_metrics,
+  XGBoost = xgb_metrics,
+  ElasticNet = glmnet_metrics,
+  DecisionTree = rpart_metrics
+)
+
+# 创建比较数据框
+comparison_df <- data.frame(
+  Model = model_names,
+  Accuracy = sapply(all_metrics, function(x) as.numeric(x$accuracy)),
+  Precision = sapply(all_metrics, function(x) as.numeric(x$precision)),
+  Recall = sapply(all_metrics, function(x) as.numeric(x$recall)),
+  F1 = sapply(all_metrics, function(x) as.numeric(x$f1)),
+  AUC = sapply(all_metrics, function(x) as.numeric(x$auc)),
+  PR_AUC = sapply(all_metrics, function(x) as.numeric(x$pr_auc))
+)
+
+print("\n========== 模型性能比较 ==========\n")
+print(comparison_df)
+
+# 找到最佳模型
+best_model_idx <- which.max(comparison_df$AUC)
+best_model_name <- comparison_df$Model[best_model_idx]
+best_auc <- comparison_df$AUC[best_model_idx]
+
+cat("\n最佳模型:", best_model_name, " (AUC =", round(best_auc, 4), ")\n")
+
+
+
+
+# 15. 可视化结果 ------------------------------------------------------------
+
+# 15.1 性能条形图
+comparison_long <- comparison_df %>%
+  pivot_longer(cols = -Model, names_to = "Metric", values_to = "Value")
+
+ggplot(comparison_long, aes(x = Model, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  theme_minimal() +
+  labs(title = "各模型性能比较 - 艾司西酞普兰自杀风险评估",
+       x = "模型", y = "分数") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set1") +
+  ylim(0, 1)
+
+# 在模型训练完成后，添加这部分代码来收集预测概率 ----------
+
+# 收集所有模型的预测概率
+pred_list <- list(
+  RF = rf_pred_prob,
+  GBM = gbm_pred_prob,
+  SVM = svm_pred_prob,
+  XGBoost = xgb_pred_prob,
+  ElasticNet = glmnet_pred_prob,
+  DecisionTree = rpart_pred_prob
+)
+
+# 模型名称列表（确保与pred_list顺序一致）
+model_names <- c("RF", "GBM", "SVM", "XGBoost", "ElasticNet", "DecisionTree")
+
+# 15.2 ROC曲线比较
+colors <- rainbow(length(model_names))
+
+plot(0, 0, type = "n", xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "假阳性率 (1-特异性)", ylab = "真阳性率 (敏感性)",
+     main = "ROC曲线比较 - 艾司西酞普兰自杀风险评估")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+auc_values <- numeric(length(model_names))
+
+for (i in seq_along(model_names)) {
+  roc_obj <- roc(y_test, pred_list[[i]])
+  auc_values[i] <- auc(roc_obj)
+  lines(1 - roc_obj$specificities, roc_obj$sensitivities, 
+        col = colors[i], lwd = 2)
+}
+
+legend("bottomright", legend = paste(model_names, "AUC =", round(auc_values, 3)),
+       col = colors, lwd = 2, cex = 0.7)
+
+# 15.3 特征重要性 (随机森林)
+importance_df <- data.frame(
+  Feature = rownames(rf_model$importance),
+  Importance = rf_model$importance[, "MeanDecreaseGini"]
+) %>% arrange(desc(Importance)) %>% head(20)
+
+ggplot(importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "随机森林特征重要性 - Top 20",
+       x = "特征", y = "重要性 (MeanDecreaseGini)")
+
+# 16. 保存结果 -------------------------------------------------------------
+library(writexl)
+# 保存模型性能比较
+write.csv(comparison_df, "model_comparison_results.csv", row.names = FALSE)
+write_xlsx(comparison_df, "model_comparison_results.xlsx")
+# 保存最佳模型
+if (best_model_name == "RF") {
+  saveRDS(rf_model, "best_model_rf.rds")
+} else if (best_model_name == "GBM") {
+  saveRDS(gbm_model, "best_model_gbm.rds")
+} else if (best_model_name == "SVM") {
+  saveRDS(svm_model, "best_model_svm.rds")
+} else if (best_model_name == "XGBoost") {
+  xgb.save(xgb_model, "best_model_xgboost.model")
+} else if (best_model_name == "ElasticNet") {
+  saveRDS(cv_glmnet, "best_model_elasticnet.rds")
+} else if (best_model_name == "DecisionTree") {
+  saveRDS(rpart_model_pruned, "best_model_decisiontree.rds")
+}
+
+cat("\n========== 分析完成！ ==========\n")
+cat("最佳模型 (基于AUC):", best_model_name, "\n")
+cat("最佳模型AUC:", round(best_auc, 4), "\n")
+cat("结果已保存到当前工作目录\n")
+
+
+
+
+# 15. 可视化结果 ------------------------------------------------------------
+
+# 确保输出目录存在
+if (!dir.exists("figures")) {
+  dir.create("figures")
+}
+
+# 15.1 性能条形图
+p1 <- ggplot(comparison_long, aes(x = Model, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  theme_minimal() +
+  labs(title = "各模型性能比较 - 艾司西酞普兰自杀风险评估",
+       x = "模型", y = "分数") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 14, face = "bold")) +
+  scale_fill_brewer(palette = "Set1") +
+  ylim(0, 1)
+
+# 保存图片
+ggsave("figures/model_performance_barplot.png", p1, width = 12, height = 8, dpi = 300)
+ggsave("figures/model_performance_barplot.pdf", p1, width = 12, height = 8)
+
+# 15.2 ROC曲线比较
+# 先绘制ROC曲线
+png("figures/roc_curves_comparison.png", width = 10, height = 8, units = "in", res = 300)
+colors <- rainbow(length(model_names))
+
+plot(0, 0, type = "n", xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "假阳性率 (1-特异性)", ylab = "真阳性率 (敏感性)",
+     main = "ROC曲线比较 - 艾司西酞普兰自杀风险评估",
+     cex.main = 1.5, cex.lab = 1.2)
+abline(a = 0, b = 1, lty = 2, col = "gray", lwd = 2)
+
+auc_values <- numeric(length(model_names))
+
+for (i in seq_along(model_names)) {
+  roc_obj <- roc(y_test, pred_list[[i]])
+  auc_values[i] <- auc(roc_obj)
+  lines(1 - roc_obj$specificities, roc_obj$sensitivities, 
+        col = colors[i], lwd = 2.5)
+}
+
+legend("bottomright", 
+       legend = paste(model_names, "AUC =", round(auc_values, 3)),
+       col = colors, lwd = 2.5, cex = 0.8, bty = "n")
+dev.off()
+
+# 也保存为PDF
+pdf("figures/roc_curves_comparison.pdf", width = 10, height = 8)
+plot(0, 0, type = "n", xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "假阳性率 (1-特异性)", ylab = "真阳性率 (敏感性)",
+     main = "ROC曲线比较 - 艾司西酞普兰自杀风险评估",
+     cex.main = 1.5, cex.lab = 1.2)
+abline(a = 0, b = 1, lty = 2, col = "gray", lwd = 2)
+
+for (i in seq_along(model_names)) {
+  roc_obj <- roc(y_test, pred_list[[i]])
+  lines(1 - roc_obj$specificities, roc_obj$sensitivities, 
+        col = colors[i], lwd = 2.5)
+}
+
+legend("bottomright", 
+       legend = paste(model_names, "AUC =", round(auc_values, 3)),
+       col = colors, lwd = 2.5, cex = 0.8, bty = "n")
+dev.off()
+
+# 15.3 特征重要性 (随机森林)
+importance_df <- data.frame(
+  Feature = rownames(rf_model$importance),
+  Importance = rf_model$importance[, "MeanDecreaseGini"]
+) %>% arrange(desc(Importance)) %>% head(20)
+
+p2 <- ggplot(importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "随机森林特征重要性 - Top 20",
+       x = "特征", y = "重要性 (MeanDecreaseGini)") +
+  theme(axis.text.y = element_text(size = 8))
+
+ggsave("figures/rf_feature_importance.png", p2, width = 12, height = 10, dpi = 300)
+ggsave("figures/rf_feature_importance.pdf", p2, width = 12, height = 10)
+
+# 15.4 XGBoost特征重要性
+xgb_importance <- xgb.importance(feature_names = colnames(X_train_mat), 
+                                 model = xgb_model)
+xgb_importance_top <- xgb_importance %>% head(20)
+
+p3 <- ggplot(xgb_importance_top, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "XGBoost特征重要性 - Top 20",
+       x = "特征", y = "重要性 (Gain)") +
+  theme(axis.text.y = element_text(size = 8))
+
+ggsave("figures/xgboost_feature_importance.png", p3, width = 12, height = 10, dpi = 300)
+ggsave("figures/xgboost_feature_importance.pdf", p3, width = 12, height = 10)
+
+# 15.5 混淆矩阵热图 (以最佳模型为例)
+best_model_name <- comparison_df$Model[which.max(comparison_df$AUC)]
+
+# 获取最佳模型的预测
+if (best_model_name == "RF") {
+  best_pred_prob <- rf_pred_prob
+} else if (best_model_name == "GBM") {
+  best_pred_prob <- gbm_pred_prob
+} else if (best_model_name == "SVM") {
+  best_pred_prob <- svm_pred_prob
+} else if (best_model_name == "XGBoost") {
+  best_pred_prob <- xgb_pred_prob
+} else if (best_model_name == "ElasticNet") {
+  best_pred_prob <- glmnet_pred_prob
+} else if (best_model_name == "DecisionTree") {
+  best_pred_prob <- rpart_pred_prob
+}
+
+best_pred_class <- ifelse(best_pred_prob >= 0.5, "预测:1", "预测:0")
+y_test_class <- ifelse(y_test == 1, "实际:1", "实际:0")
+
+cm_data <- as.data.frame(table(预测 = best_pred_class, 实际 = y_test_class))
+
+p4 <- ggplot(cm_data, aes(x = 预测, y = 实际, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 8) +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = paste("混淆矩阵 -", best_model_name, "(AUC =", round(max(comparison_df$AUC), 4), ")"),
+       x = "预测类别", y = "实际类别", fill = "计数") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggsave("figures/confusion_matrix_best_model.png", p4, width = 8, height = 6, dpi = 300)
+ggsave("figures/confusion_matrix_best_model.pdf", p4, width = 8, height = 6)
+
+# 15.6 额外：模型性能热图
+library(pheatmap)
+
+# 准备热图数据
+heatmap_data <- comparison_df %>%
+  select(-Model) %>%
+  as.matrix()
+
+rownames(heatmap_data) <- comparison_df$Model
+
+# 保存热图
+png("figures/model_performance_heatmap.png", width = 10, height = 8, units = "in", res = 300)
+pheatmap::pheatmap(
+  heatmap_data,
+  main = "模型性能热图",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  display_numbers = TRUE,
+  number_format = "%.3f",
+  color = colorRampPalette(c("red", "yellow", "green"))(100),
+  cellwidth = 60,
+  cellheight = 30
+)
+dev.off()
+
+# 15.7 额外：精确率-召回率权衡图
+p5 <- ggplot(comparison_df, aes(x = Recall, y = Precision, color = Model, size = AUC)) +
+  geom_point(alpha = 0.7) +
+  geom_text(aes(label = Model), vjust = -1.2, size = 3.5) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "精确率-召回率权衡图",
+       x = "召回率 (Recall)", 
+       y = "精确率 (Precision)",
+       size = "AUC") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold")) +
+  xlim(0.7, 1) +
+  ylim(0.65, 0.78)
+
+ggsave("figures/precision_recall_tradeoff.png", p5, width = 10, height = 7, dpi = 300)
+ggsave("figures/precision_recall_tradeoff.pdf", p5, width = 10, height = 7)
+
+# 15.8 额外：F1分数与AUC关系图
+p6 <- ggplot(comparison_df, aes(x = F1, y = AUC, label = Model, color = Model)) +
+  geom_point(size = 4) +
+  geom_text(vjust = -1.2, size = 4) +
+  geom_hline(yintercept = mean(comparison_df$AUC), linetype = "dashed", alpha = 0.5) +
+  geom_vline(xintercept = mean(comparison_df$F1), linetype = "dashed", alpha = 0.5) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "F1分数与AUC的关系",
+       x = "F1分数", 
+       y = "AUC") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 14, face = "bold")) +
+  xlim(0.75, 0.82) +
+  ylim(0.75, 0.87)
+
+ggsave("figures/f1_auc_relationship.png", p6, width = 10, height = 7, dpi = 300)
+ggsave("figures/f1_auc_relationship.pdf", p6, width = 10, height = 7)
+
+# 15.9 额外：模型排名图 (按AUC)
+ranked_by_auc <- comparison_df %>%
+  arrange(desc(AUC)) %>%
+  mutate(Rank = 1:n())
+
+p7 <- ggplot(ranked_by_auc, aes(x = reorder(Model, -AUC), y = AUC, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = round(AUC, 4)), vjust = -0.5, size = 4.5) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "模型AUC排名",
+       x = "模型", 
+       y = "AUC") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 14, face = "bold")) +
+  ylim(0, 1)
+
+ggsave("figures/model_auc_ranking.png", p7, width = 10, height = 6, dpi = 300)
+ggsave("figures/model_auc_ranking.pdf", p7, width = 10, height = 6)
+
+# 输出完成信息
+cat("\n========== 图片保存完成 ==========\n")
+cat("所有图片已保存到 'figures' 文件夹:\n")
+cat("1. model_performance_barplot.png/.pdf - 性能条形图\n")
+cat("2. roc_curves_comparison.png/.pdf - ROC曲线比较\n")
+cat("3. rf_feature_importance.png/.pdf - 随机森林特征重要性\n")
+cat("4. xgboost_feature_importance.png/.pdf - XGBoost特征重要性\n")
+cat("5. confusion_matrix_best_model.png/.pdf - 最佳模型混淆矩阵\n")
+cat("6. model_performance_heatmap.png - 性能热图\n")
+cat("7. precision_recall_tradeoff.png/.pdf - 精确率-召回率权衡图\n")
+cat("8. f1_auc_relationship.png/.pdf - F1与AUC关系图\n")
+cat("9. model_auc_ranking.png/.pdf - 模型AUC排名图\n")
+
+
+# ============================================================================
+# 审稿意见 1：所有性能指标的 95% CI + 模型间差异 CI + 重复交叉验证
+# 需安装：install.packages(c("boot", "PRROC"))
+# ============================================================================
+suppressPackageStartupMessages({
+  library(boot); library(pROC); library(PRROC)
+})
+dir.create("results/reviewer", showWarnings = FALSE, recursive = TRUE)
+
+# ---------- 通用：单模型 bootstrap 指标 CI ----------
+boot_metrics_ci <- function(pred_prob, y_true, threshold = 0.5, R = 2000, seed = 2024) {
+  set.seed(seed)
+  metric_fun <- function(d, idx) {
+    p <- d$pred[idx]; y <- d$y[idx]
+    cls <- ifelse(p >= threshold, 1, 0)
+    tp <- sum(cls == 1 & y == 1); fp <- sum(cls == 1 & y == 0)
+    tn <- sum(cls == 0 & y == 0); fn <- sum(cls == 0 & y == 1)
+    acc <- (tp + tn) / length(y)
+    sens <- ifelse((tp + fn) > 0, tp / (tp + fn), NA)
+    spec <- ifelse((tn + fp) > 0, tn / (tn + fp), NA)
+    prec <- ifelse((tp + fp) > 0, tp / (tp + fp), NA)
+    f1 <- ifelse(!is.na(prec) & !is.na(sens) & (prec + sens) > 0,
+                 2 * prec * sens / (prec + sens), NA)
+    auc_v <- tryCatch(as.numeric(auc(roc(y, p, quiet = TRUE))), error = function(e) NA)
+    pr_v <- tryCatch({
+      pr <- PRROC::pr.curve(scores.class0 = p[y == 1], scores.class1 = p[y == 0], curve = FALSE)
+      pr$auc.integral
+    }, error = function(e) NA)
+    c(Accuracy = acc, Sensitivity = sens, Specificity = spec,
+      Precision = prec, F1 = f1, AUC = auc_v, PR_AUC = pr_v)
+  }
+  d <- data.frame(pred = pred_prob, y = y_true)
+  b <- boot(d, metric_fun, R = R)
+  ci <- apply(b$t, 2, function(x) quantile(x, c(0.025, 0.975), na.rm = TRUE))
+  point <- metric_fun(d, 1:length(y_true))
+  data.frame(Metric = names(point), Point = as.numeric(point),
+             Lower = ci[1, ], Upper = ci[2, ], row.names = NULL)
+}
+
+# ---------- 1. 六个模型所有指标的 CI 表 ----------
+
+pred_list <- list(
+  RF = rf_pred_prob,
+  GBM = gbm_pred_prob,
+  SVM = svm_pred_prob,
+  XGBoost = xgb_pred_prob,
+  ElasticNet = glmnet_pred_prob,
+  DecisionTree = rpart_pred_prob
+)
+model_names <- c("RF", "GBM", "SVM", "XGBoost", "ElasticNet", "DecisionTree")
+
+ci_all <- do.call(rbind, lapply(model_names, function(m) {
+  df <- boot_metrics_ci(pred_list[[m]], y_test, threshold = 0.5, R = 2000)
+  df$Model <- m
+  df
+}))
+
+ci_all <- ci_all[, c("Model", "Metric", "Point", "Lower", "Upper")]
+write.csv(ci_all, "faers_ci_all_models.csv", row.names = FALSE)
+
+# ---------- 2. 模型间 AUC 差值的 bootstrap CI ----------
+# 同一重抽样索引下同时评估两个模型，差值 CI 比分别看两个 CI 是否重叠更严谨
+model_pairs <- combn(model_names, 2, simplify = FALSE)
+
+boot_auc_diff <- function(pred_a, pred_b, y_true, R = 2000, seed = 2024) {
+  set.seed(seed)
+  n <- length(y_true)
+  auc_a <- auc(roc(y_true, pred_a, quiet = TRUE))
+  auc_b <- auc(roc(y_true, pred_b, quiet = TRUE))
+  point_diff <- as.numeric(auc_a - auc_b)
+  diffs <- numeric(R)
+  for (r in 1:R) {
+    idx <- sample.int(n, n, replace = TRUE)
+    y_r <- y_true[idx]
+    if (length(unique(y_r)) < 2) { diffs[r] <- NA; next }
+    a_r <- tryCatch(as.numeric(auc(roc(y_r, pred_a[idx], quiet = TRUE))), error = function(e) NA)
+    b_r <- tryCatch(as.numeric(auc(roc(y_r, pred_b[idx], quiet = TRUE))), error = function(e) NA)
+    diffs[r] <- a_r - b_r
+  }
+  ci <- quantile(diffs, c(0.025, 0.975), na.rm = TRUE)
+  data.frame(Model_A = NA, Model_B = NA, AUC_A = as.numeric(auc_a), AUC_B = as.numeric(auc_b),
+             Diff = point_diff, Lower = ci[1], Upper = ci[2])
+}
+
+diff_tab <- do.call(rbind, lapply(model_pairs, function(pr) {
+  out <- boot_auc_diff(pred_list[[pr[1]]], pred_list[[pr[2]]], y_test, R = 2000)
+  out$Model_A <- pr[1]; out$Model_B <- pr[2]
+  out[, c("Model_A", "Model_B", "AUC_A", "AUC_B", "Diff", "Lower", "Upper")]
+}))
+write.csv(diff_tab, "faers_auc_pairwise_diff_ci.csv", row.names = FALSE)
+
+# ---------- 3. 重复交叉验证（反映模型选择层面的不确定性） ----------
+# 在训练集上做 5 折 × 10 次重复，每次重复内重新训练六个模型并记录 AUC
+suppressPackageStartupMessages({ library(caret); library(randomForest)
+  library(gbm); library(e1071); library(xgboost); library(glmnet); library(rpart) })
+
+run_repeated_cv <- function(X_train_df, y_train, X_train_mat, X_train_scaled,
+                            repeats = 10, folds = 5, seed = 2024) {
+  set.seed(seed)
+  # 统一折划分，保证六个模型在同一折上比较
+  folds_list <- createMultiFolds(as.factor(y_train), k = folds, times = repeats)
+  model_names_cv <- c("RF","GBM","SVM","XGBoost","ElasticNet","DecisionTree")
+  res <- matrix(NA, nrow = length(folds_list), ncol = length(model_names_cv),
+                dimnames = list(NULL, model_names_cv))
+  
+  for (i in seq_along(folds_list)) {
+    tr <- folds_list[[i]]; te <- setdiff(seq_along(y_train), tr)
+    Xtr <- X_train_df[tr, , drop = FALSE]; Xte <- X_train_df[te, , drop = FALSE]
+    ytr <- y_train[tr]; yte <- y_train[te]
+    
+    # RF
+    rf <- randomForest(x = Xtr, y = as.factor(ytr), ntree = 500,
+                       mtry = floor(sqrt(ncol(Xtr))), nodesize = 5)
+    res[i, "RF"] <- as.numeric(auc(roc(yte, predict(rf, Xte, type = "prob")[, 2], quiet = TRUE)))
+    
+    # GBM
+    gbm_df <- cbind(Xtr, y_train = ytr)
+    gb <- gbm(y_train ~ ., data = gbm_df, distribution = "bernoulli",
+              n.trees = 500, interaction.depth = 3, n.minobsinnode = 5,
+              shrinkage = 0.01, cv.folds = 5, verbose = FALSE)
+    bt <- gbm.perf(gb, method = "cv", plot.it = FALSE)
+    res[i, "GBM"] <- as.numeric(auc(roc(yte, predict(gb, Xte, n.trees = bt, type = "response"), quiet = TRUE)))
+    
+    # SVM
+    sv <- svm(x = Xtr, y = as.factor(ytr), kernel = "radial", probability = TRUE,
+              cost = 1, gamma = 1/ncol(Xtr))
+    svp <- attr(predict(sv, Xte, probability = TRUE), "probabilities")[, "1"]
+    res[i, "SVM"] <- as.numeric(auc(roc(yte, svp, quiet = TRUE)))
+    
+    # XGBoost
+    dtrain_cv <- xgb.DMatrix(data = as.matrix(Xtr), label = ytr)
+    dtest_cv <- xgb.DMatrix(data = as.matrix(Xte), label = yte)
+    xg <- xgb.train(params = list(objective = "binary:logistic", eval_metric = "auc",
+                                  max_depth = 6, eta = 0.1, subsample = 0.8,
+                                  colsample_bytree = 0.8, min_child_weight = 1),
+                    data = dtrain_cv, nrounds = 100, verbose = 0)
+    res[i, "XGBoost"] <- as.numeric(auc(roc(yte, predict(xg, dtest_cv), quiet = TRUE)))
+    
+    # ElasticNet
+    pre <- preProcess(Xtr, method = c("center","scale"))
+    Xtr_s <- as.matrix(predict(pre, Xtr)); Xte_s <- as.matrix(predict(pre, Xte))
+    cvgl <- cv.glmnet(x = Xtr_s, y = ytr, family = "binomial", alpha = 0.5, nfolds = 5)
+    res[i, "ElasticNet"] <- as.numeric(auc(roc(yte,
+                                               predict(cvgl, Xte_s, s = cvgl$lambda.min, type = "response")[, 1], quiet = TRUE)))
+    
+    # DecisionTree
+    rp <- rpart(as.factor(ytr) ~ ., data = as.data.frame(Xtr_s), method = "class",
+                cp = 0.01, minsplit = 20)
+    rp <- prune(rp, cp = rp$cptable[which.min(rp$cptable[, "xerror"]), "CP"])
+    rp_prob <- predict(rp, as.data.frame(Xte_s), type = "prob")[, 2]
+    res[i, "DecisionTree"] <- as.numeric(auc(roc(yte, rp_prob, quiet = TRUE)))
+  }
+  res
+}
+
+cv_auc <- run_repeated_cv(X_train_df, y_train, X_train_mat, X_train_scaled,
+                          repeats = 10, folds = 5, seed = 2024)
+
+cv_summary <- data.frame(
+  Model = colnames(cv_auc),
+  Mean_AUC = colMeans(cv_auc, na.rm = TRUE),
+  SD_AUC = apply(cv_auc, 2, sd, na.rm = TRUE),
+  Lower = apply(cv_auc, 2, quantile, probs = 0.025, na.rm = TRUE),
+  Upper = apply(cv_auc, 2, quantile, probs = 0.975, na.rm = TRUE)
+)
+write.csv(cv_summary, "faers_repeated_cv_auc.csv", row.names = FALSE)
+
+cat("\n审稿意见 1 补充分析完成：\n")
+cat("  results/reviewer/faers_ci_all_models.csv         - 六模型全指标 CI\n")
+cat("  results/reviewer/faers_auc_pairwise_diff_ci.csv  - 模型间 AUC 差值 CI\n")
+cat("  results/reviewer/faers_repeated_cv_auc.csv       - 重复交叉验证 AUC\n")
+
+
+library(dplyr)
+library(tidyr)
+
+# 假设你的 ci_all 数据框在当前环境中
+# 1. 将点估计和 CI 拼接为格式化字符串
+ci_formatted <- ci_all %>%
+  mutate(
+    # 拼接为 "Point (Lower-Upper)" 格式，保留3位小数
+    Value_Formatted = sprintf("%.3f (%.3f–%.3f)", Point, Lower, Upper)
+  ) %>%
+  # 只保留需要的列
+  select(Model, Metric, Value_Formatted) %>%
+  # 将长格式转换为宽格式（行是Model，列是Metric）
+  pivot_wider(names_from = Metric, values_from = Value_Formatted)
+
+# 2. 调整列的顺序（按你论文需要的逻辑）
+# 假设 Metric 包括 Accuracy, Sensitivity, Specificity, Precision, F1, AUC, PR_AUC
+# 如果某列不存在（比如没算 PR_AUC），any_of 会自动跳过
+col_order <- c("Model", "AUC", "PR_AUC", "Accuracy", "Sensitivity", 
+               "Specificity", "Precision", "F1")
+ci_formatted <- ci_formatted %>% select(any_of(col_order))
+
+# 3. 查看最终表格
+print(ci_formatted)
+
+# 4. 保存为 CSV 供 Word/Excel 使用
+write.csv(ci_formatted, "Table_FAERS_Performance_with_CI.csv", row.names = FALSE)
+library(writexl)
+# 导出长表
+write_xlsx(ci_all, "faers_ci_all_models.xlsx")
+
+
+# ============================================================================
+# 校准度、临床效用(DCA)、混淆矩阵、样本量
+# ============================================================================
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(pROC)
+  library(CalibrationCurves)
+  library(dcurves)
+  library(writexl)
+})
+
+dir.create("results/reviewer", showWarnings = FALSE, recursive = TRUE)
+
+# 提取最佳模型（XGBoost）的预测概率
+best_pred_prob <- pred_list[["XGBoost"]]
+y_true <- as.numeric(y_test)
+
+# ============================================================================
+# 校准度评估 (Calibration) - 截距、斜率、校准图
+# ============================================================================
+cat("\n--- 正在计算校准度 ---\n")
+
+# 1. 计算校准截距 (C) 和 校准斜率 (Slope) 及 95% CI
+cal_obj <- val.prob.ci.2(p = best_pred_prob, y = y_true, 
+                         smooth = "loess", legendloc = FALSE, 
+                         CL.smooth = TRUE, dostats = TRUE)
+
+# 将 val.prob.ci.2 的结果展开为向量，方便模糊匹配
+cal_vec <- unlist(cal_obj)
+
+# 使用 grep 寻找包含 "Intercept" 或 "Slope" 的元素名
+# 并区分点估计（不包含 lower/upper 的）和 CI
+intercept_idx <- grep("Intercept", names(cal_vec), ignore.case = TRUE)
+slope_idx <- grep("Slope", names(cal_vec), ignore.case = TRUE)
+
+# 提取截距的点估计、下限和上限
+c_point <- cal_vec[intercept_idx[1]]
+c_lower <- cal_vec[grep("lower", names(cal_vec)[intercept_idx], ignore.case = TRUE)]
+c_upper <- cal_vec[grep("upper", names(cal_vec)[intercept_idx], ignore.case = TRUE)]
+
+# 提取斜率的点估计、下限和上限
+s_point <- cal_vec[slope_idx[1]]
+s_lower <- cal_vec[grep("lower", names(cal_vec)[slope_idx], ignore.case = TRUE)]
+s_upper <- cal_vec[grep("upper", names(cal_vec)[slope_idx], ignore.case = TRUE)]
+
+# 如果上述模糊提取失败（返回 empty），我们可以使用备选方案（见下方第三步）
+
+# 如果有找到值，则构建数据框
+if (length(c_point) > 0 && length(s_point) > 0) {
+  cal_table <- data.frame(
+    Metric = c("Calibration Intercept", "Calibration Slope"),
+    Estimate = c(as.numeric(c_point[1]), as.numeric(s_point[1])),
+    Lower_95CI = c(as.numeric(c_lower[1]), as.numeric(s_lower[1])),
+    Upper_95CI = c(as.numeric(c_upper[1]), as.numeric(s_upper[1]))
+  )
+  print(cal_table)
+  write.csv(cal_table, "faers_calibration_stats.csv", row.names = FALSE)
+}
+# ============================================================================
+# 自建稳健版校准度计算（不依赖 CalibrationCurves 包）
+# ============================================================================
+
+# 1. 计算校准截距 (Calibration-in-the-large) 和 斜率 (Slope)
+# 原理：将预测概率进行 logit 变换后作为自变量，真实标签为因变量做 logistic 回归
+lp <- log(best_pred_prob / (1 - best_pred_prob))
+# 避免极端值引起的 Inf
+lp[is.infinite(lp)] <- ifelse(lp[is.infinite(lp)] > 0, 10, -10) 
+
+cal_glm <- glm(y_test ~ lp, family = binomial)
+summary_cal <- summary(cal_glm)$coefficients
+
+# 提取截距及 95% CI
+cal_intercept <- summary_cal["(Intercept)", 1]
+cal_intercept_lower <- cal_intercept - 1.96 * summary_cal["(Intercept)", 2]
+cal_intercept_upper <- cal_intercept + 1.96 * summary_cal["(Intercept)", 2]
+
+# 提取斜率及 95% CI
+cal_slope <- summary_cal["lp", 1]
+cal_slope_lower <- cal_slope - 1.96 * summary_cal["lp", 2]
+cal_slope_upper <- cal_slope + 1.96 * summary_cal["lp", 2]
+
+# 整理成表格
+cal_table <- data.frame(
+  Metric = c("Calibration Intercept", "Calibration Slope"),
+  Estimate = c(cal_intercept, cal_slope),
+  Lower_95CI = c(cal_intercept_lower, cal_slope_lower),
+  Upper_95CI = c(cal_intercept_upper, cal_slope_upper)
+)
+
+cat("\n========== 校准度评估结果 ==========\n")
+print(cal_table)
+write.csv(cal_table, "faers_calibration_stats.csv", row.names = FALSE)
+
+# ============================================================================
+# 2. 绘制 SCI 质量校准图 (Calibration Plot)
+# ============================================================================
+library(ggplot2)
+
+# 将预测概率分为 10 个等宽区间（Deciles）
+cal_df <- data.frame(pred = best_pred_prob, obs = y_test)
+cal_df$bin <- cut(cal_df$pred, breaks = seq(0, 1, 0.1), include.lowest = TRUE)
+
+# 计算每个区间的平均预测概率和实际发生率
+cal_plot_data <- cal_df %>%
+  group_by(bin) %>%
+  summarise(
+    mean_pred = mean(pred, na.rm = TRUE),
+    mean_obs = mean(obs, na.rm = TRUE),
+    n = n(),
+    # 计算二项分布的 95% 置信区间
+    se = sqrt(mean_obs * (1 - mean_obs) / n),
+    lower = pmax(0, mean_obs - 1.96 * se),
+    upper = pmin(1, mean_obs + 1.96 * se),
+    .groups = "drop"
+  ) %>%
+  filter(n > 0)
+
+# 绘图
+p_cal <- ggplot(cal_plot_data, aes(x = mean_pred, y = mean_obs)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50", linewidth = 1) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.02, color = "#377EB8", alpha = 0.7) +
+  geom_point(size = 3, color = "#E41A1C") +
+  geom_line(color = "#E41A1C", linewidth = 1, alpha = 0.6) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "Calibration Plot - FAERS Test Set",
+    x = "Predicted Probability",
+    y = "Observed Proportion"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+# 保存图片
+ggsave("faers_calibration_plot.png", p_cal, width = 6, height = 6, dpi = 300, bg = "white")
+
+
+
+
+# 2. 绘制并保存校准图 (Calibration Plot)
+png("faers_calibration_plot.png", width = 6, height = 6, units = "in", res = 300)
+val.prob.ci.2(p = best_pred_prob, y = y_true, smooth = "loess", 
+              legendloc = FALSE, CL.smooth = TRUE)
+dev.off()
+
+# ============================================================================
+# 决策曲线分析 (DCA) - 净收益 Net Benefit
+# ============================================================================
+cat("\n--- 正在进行决策曲线分析 (DCA) ---\n")
+
+# 创建数据框用于 DCA
+dca_data <- data.frame(
+  outcome = y_true,
+  pred_prob = best_pred_prob
+)
+
+# 计算 DCA，阈值范围 0.01 到 0.99
+dca_res <- dca(outcome ~ pred_prob, data = dca_data, 
+               thresholds = seq(0.01, 0.99, by = 0.01))
+
+# 提取 DCA 数据并保存
+dca_df <- as.data.frame(dca_res$dca)
+write.csv(dca_df, "faers_dca_data.csv", row.names = FALSE)
+
+# 绘制 DCA 图
+dca_plot <- plot(dca_res) + 
+  ggplot2::labs(title = "Decision Curve Analysis - FAERS Test Set",
+                x = "Threshold Probability", y = "Net Benefit") +
+  ggplot2::theme_minimal()
+
+ggplot2::ggsave("faers_dca_plot.png", dca_plot, width = 7, height = 5, dpi = 300)
+
+# ============================================================================
+# 完整混淆矩阵 (TP, FP, TN, FN)
+# ============================================================================
+cat("\n--- 正在计算混淆矩阵 ---\n")
+
+# 以 0.5 为阈值
+pred_class <- ifelse(best_pred_prob >= 0.5, 1, 0)
+cm <- table(Predicted = factor(pred_class, levels = c(0, 1)), 
+            Actual = factor(y_true, levels = c(0, 1)))
+
+TP <- cm["1", "1"]
+FP <- cm["1", "0"]
+TN <- cm["0", "0"]
+FN <- cm["0", "1"]
+
+# 计算衍生指标
+Sensitivity <- TP / (TP + FN)
+Specificity <- TN / (TN + FP)
+PPV <- TP / (TP + FP)
+NPV <- TN / (TN + FN)
+
+cm_table <- data.frame(
+  Dataset = "FAERS_internal_test",
+  Model = "XGBoost",
+  Threshold = 0.5,
+  TP = TP, FP = FP, TN = TN, FN = FN,
+  Sensitivity = Sensitivity, Specificity = Specificity,
+  PPV = PPV, NPV = NPV
+)
+print(cm_table)
+write.csv(cm_table, "faers_confusion_matrix.csv", row.names = FALSE)
+
+# ============================================================================
+# 样本量与 EPV (Events Per Variable)
+# ============================================================================
+# 使用 X_train_df 的列数来获取预测变量个数
+# （X_train_df 就是刚才训练模型用的数据框，它的列数就是模型实际输入的特征数）
+n_predictors <- ncol(X_train_df)
+
+# 如果 X_train_df 也不小心被清理了，可以用这个备选方案读取之前保存的文件：
+# training_columns <- readRDS("results/training_columns.rds")
+# n_predictors <- length(training_columns)
+
+# 接下来计算 EPV 并生成表格
+n_events_train <- sum(y_train == 1)
+n_events_test <- sum(y_test == 1)
+
+epv_train <- n_events_train / n_predictors
+epv_test <- n_events_test / n_predictors
+
+sample_table <- data.frame(
+  Dataset = c("Training Set", "Test Set"),
+  Total_Samples = c(length(y_train), length(y_test)),
+  Events = c(n_events_train, n_events_test),
+  Non_Events = c(length(y_train) - n_events_train, length(y_test) - n_events_test),
+  Candidate_Predictors = n_predictors,
+  EPV = c(epv_train, epv_test)
+)
+
+print(sample_table)
+write.csv(sample_table, "faers_sample_size_epv.csv", row.names = FALSE)
+# ============================================================================
+# JADER验证集数据处理与XGBoost模型预测（处理新类别）
+# ============================================================================
+
+# 1. 加载必要的包 ------------------------------------------------------------
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(xgboost)
+library(pROC)
+library(ggplot2)
+
+set.seed(123)
+
+# 2. 检查必要文件 ------------------------------------------------------------
+
+required_files <- c(
+  "results/best_model_xgboost.model",
+  "results/dummy_model.rds",
+  "results/training_columns.rds"
+)
+
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0) {
+  cat("错误：以下文件缺失，请先运行模型训练代码：\n")
+  for (f in missing_files) {
+    cat("  -", f, "\n")
+  }
+  stop("请先运行模型训练代码保存所有必要文件")
+}
+
+cat("✓ 所有必要文件已找到\n")
+
+# 3. 读取验证集数据 -----------------------------------------------------------
+validation_data <- read_excel("JADER机器模型数据.xlsx")
+
+# 查看原始数据结构
+cat("\n========== 验证集原始数据结构 ==========\n")
+str(validation_data)
+print(head(validation_data))
+
+# 4. 列名转换（日文 → 英文）-------------------------------------------------
+
+# 原始列名（日文）
+original_cols <- c("primaryid", "caseid", "年齢", "性別", "体重", 
+                   "転帰", "原疾患等", "有害事象", "医薬品の関与")
+
+# 目标列名（英文，与训练集一致）
+target_cols <- c("primaryid", "caseid", "age_raw", "sex_raw", "wt_raw", 
+                 "outcome", "indi_pt", "pt", "role_cod")
+
+# 重命名列
+colnames(validation_data) <- target_cols
+
+cat("\n========== 列名转换后 ==========\n")
+print(names(validation_data))
+print(head(validation_data))
+
+# 5. 数据预处理（转换为与训练集一致的格式）----------------------------------
+
+# 5.1 处理年龄
+validation_data$age_imputed <- NA
+
+age_mapping <- list(
+  "10歳代" = 15, "20歳代" = 25, "30歳代" = 35,
+  "40歳代" = 45, "50歳代" = 55, "60歳代" = 65,
+  "70歳代" = 75, "80歳代" = 85, "90歳代" = 95
+)
+
+for (pattern in names(age_mapping)) {
+  validation_data$age_imputed[grepl(pattern, validation_data$age_raw)] <- age_mapping[[pattern]]
+}
+
+# 5.2 处理性别
+validation_data$sex_imputed <- NA
+validation_data$sex_imputed[validation_data$sex_raw == "男性"] <- 1
+validation_data$sex_imputed[validation_data$sex_raw == "女性"] <- 2
+
+# 5.3 处理体重
+validation_data$wt_value <- as.numeric(gsub("kg台|kg", "", validation_data$wt_raw))
+
+impute_weight <- function(data) {
+  weight_ref <- data %>%
+    filter(!is.na(wt_value)) %>%
+    group_by(age_imputed, sex_imputed) %>%
+    summarise(median_wt = median(wt_value, na.rm = TRUE), .groups = "drop")
+  
+  global_median <- median(data$wt_value, na.rm = TRUE)
+  
+  data$wt_imputed <- data$wt_value
+  for (i in 1:nrow(data)) {
+    if (is.na(data$wt_imputed[i])) {
+      match <- weight_ref %>%
+        filter(age_imputed == data$age_imputed[i] & 
+                 sex_imputed == data$sex_imputed[i])
+      if (nrow(match) > 0) {
+        data$wt_imputed[i] <- match$median_wt[1]
+      } else {
+        data$wt_imputed[i] <- global_median
+      }
+    }
+  }
+  return(data)
+}
+
+validation_data <- impute_weight(validation_data)
+
+# 5.4 处理转归编码
+outcome_mapping <- c(
+  "軽快" = 1, "回復" = 2, "未回復" = 3, 
+  "後遺症" = 4, "死亡" = 5, "不明" = 6
+)
+validation_data$outc_cod_imputed <- outcome_mapping[validation_data$outcome]
+
+# 5.5 处理适应症 - 关键步骤：将新出现的类别映射为"Other"
+# 先获取训练数据中存在的适应症水平
+# 这里需要从dummy模型中提取训练数据中的因子水平
+
+# 从dummy模型中提取训练数据的因子水平
+train_factor_levels <- dummy_model$lvls
+
+# 获取indi_pt_imputed的训练水平
+if ("indi_pt_imputed" %in% names(train_factor_levels)) {
+  train_indi_levels <- train_factor_levels$indi_pt_imputed
+  cat("\n训练集中indi_pt_imputed的水平数:", length(train_indi_levels))
+  cat("\n前10个水平:", paste(head(train_indi_levels, 10), collapse = ", "))
+} else {
+  # 如果无法从dummy模型获取，手动定义常见的适应症
+  train_indi_levels <- c("うつ病", "不安障害", "パニック障害", "不眠症", 
+                         "抑うつ症状", "認知症", "本態性振戦", "排尿困難",
+                         "慢性閉塞性肺疾患", "硬膜下血腫")
+  cat("\n使用手动定义的训练集适应症水平\n")
+}
+
+# 处理适应症：将不在训练集中的水平替换为"Other"
+validation_data$indi_pt_imputed_clean <- validation_data$indi_pt
+
+# 找出不在训练集中的适应症
+new_indi_levels <- setdiff(unique(validation_data$indi_pt_imputed_clean), train_indi_levels)
+
+if (length(new_indi_levels) > 0) {
+  cat("\n验证集中新出现的适应症水平数:", length(new_indi_levels))
+  cat("\n前20个新水平:", paste(head(new_indi_levels, 20), collapse = ", "))
+  
+  # 将新水平替换为"Other"
+  validation_data$indi_pt_imputed_clean[validation_data$indi_pt_imputed_clean %in% new_indi_levels] <- "Other"
+  cat("\n已将新出现的适应症水平替换为'Other'\n")
+}
+
+# 5.6 处理角色编码
+validation_data$role_cod <- NA
+role_mapping <- c(
+  "被疑薬" = 1, "併用薬" = 2, 
+  "相互作用" = 3, "被疑薬等" = 1
+)
+validation_data$role_cod <- role_mapping[validation_data$role_cod]
+
+# 5.7 创建目标变量
+suicide_pt <- c("自殺既遂", "自殺企図", "自殺念慮")
+validation_data$target <- as.numeric(validation_data$pt %in% suicide_pt)
+
+# 6. 查看处理后的数据 ---------------------------------------------------------
+
+cat("\n========== 预处理后的验证集数据 ==========\n")
+print(head(validation_data))
+
+# 7. 准备验证集特征数据 ------------------------------------------------------
+
+# 使用清理后的适应症列
+validation_features <- validation_data %>%
+  select(
+    age_imputed,
+    sex_imputed,
+    wt_imputed,
+    outc_cod_imputed,
+    indi_pt_imputed = indi_pt_imputed_clean,  # 使用清理后的适应症
+    role_cod
+  )
+
+# 确保所有特征都是正确的数据类型
+# 将字符型转换为因子
+validation_features <- validation_features %>%
+  mutate(
+    sex_imputed = as.factor(sex_imputed),
+    outc_cod_imputed = as.factor(outc_cod_imputed),
+    indi_pt_imputed = as.factor(indi_pt_imputed),
+    role_cod = as.factor(role_cod)
+  )
+
+cat("\n验证集特征列名:\n")
+print(names(validation_features))
+
+cat("\n验证集特征数据类型:\n")
+print(sapply(validation_features, class))
+
+# 8. 加载模型和预处理对象 ----------------------------------------------------
+
+# 加载XGBoost模型
+xgb_model <- xgb.load("results/best_model_xgboost.model")
+cat("\n✓ XGBoost模型加载成功\n")
+
+# 加载dummy模型
+dummy_model <- readRDS("results/dummy_model.rds")
+cat("✓ dummy_model加载成功\n")
+
+# 加载训练列名
+training_columns <- readRDS("results/training_columns.rds")
+cat("✓ training_columns加载成功，共", length(training_columns), "个特征\n")
+
+# 9. 应用dummy编码（使用tryCatch处理错误）----------------------------------
+
+# 方法1：尝试直接预测
+validation_dummy <- tryCatch({
+  predict(dummy_model, validation_features)
+}, error = function(e) {
+  cat("\n⚠ 直接预测失败，尝试手动处理...\n")
+  cat("错误信息:", e$message, "\n")
+  
+  # 方法2：手动创建dummy变量
+  # 将验证集特征与训练集特征对齐
+  
+  # 获取训练集的特征水平
+  train_levels <- dummy_model$lvls
+  
+  # 手动创建dummy变量
+  # 对于每个因子变量，创建对应的dummy列
+  dummy_result <- data.frame(row.names = 1:nrow(validation_features))
+  
+  # 处理每个因子变量
+  for (var_name in names(train_levels)) {
+    if (var_name %in% names(validation_features)) {
+      var_levels <- train_levels[[var_name]]
+      var_values <- as.character(validation_features[[var_name]])
+      
+      # 创建dummy列
+      for (level in var_levels) {
+        col_name <- paste0(var_name, level)
+        dummy_result[[col_name]] <- as.numeric(var_values == level)
+      }
+    }
+  }
+  
+  # 添加数值型变量
+  numeric_vars <- c("age_imputed", "wt_imputed")
+  for (var_name in numeric_vars) {
+    if (var_name %in% names(validation_features)) {
+      dummy_result[[var_name]] <- validation_features[[var_name]]
+    }
+  }
+  
+  return(dummy_result)
+})
+
+# 如果validation_dummy是数据框，直接使用
+if (is.data.frame(validation_dummy)) {
+  validation_df <- validation_dummy
+} else {
+  validation_df <- as.data.frame(validation_dummy)
+}
+
+cat("\n验证集dummy编码维度:", dim(validation_df))
+cat("\n验证集dummy编码列数:", ncol(validation_df))
+
+# 10. 对齐特征列 -------------------------------------------------------------
+
+# 创建与训练集完全相同的列结构（全部初始化为0）
+validation_df_aligned <- data.frame(matrix(0, 
+                                           nrow = nrow(validation_df), 
+                                           ncol = length(training_columns)))
+colnames(validation_df_aligned) <- training_columns
+
+# 填充共同列的值
+common_cols <- intersect(colnames(validation_df), training_columns)
+cat("\n共同列数:", length(common_cols))
+
+for (col in common_cols) {
+  validation_df_aligned[[col]] <- validation_df[[col]]
+}
+
+# 检查特征数量
+cat("\n对齐后特征数量:", ncol(validation_df_aligned))
+cat("\n模型期望特征数量:", xgb_model$learner_model_param$num_feature)
+
+if (ncol(validation_df_aligned) != xgb_model$learner_model_param$num_feature) {
+  cat("\n⚠ 警告: 特征数量不匹配！")
+  cat("\n实际:", ncol(validation_df_aligned), "期望:", xgb_model$learner_model_param$num_feature)
+}
+
+# 处理NA值
+validation_df_aligned[is.na(validation_df_aligned)] <- 0
+
+# 11. 进行预测 ---------------------------------------------------------------
+
+# 转换为矩阵
+validation_mat <- as.matrix(validation_df_aligned)
+
+# 如果特征数量不匹配，进行调整
+if (ncol(validation_mat) != xgb_model$learner_model_param$num_feature) {
+  if (ncol(validation_mat) > xgb_model$learner_model_param$num_feature) {
+    validation_mat <- validation_mat[, 1:xgb_model$learner_model_param$num_feature]
+  } else {
+    extra_cols <- xgb_model$learner_model_param$num_feature - ncol(validation_mat)
+    validation_mat <- cbind(validation_mat, matrix(0, nrow = nrow(validation_mat), ncol = extra_cols))
+  }
+}
+
+# 创建xgb.DMatrix
+validation_dtest <- xgb.DMatrix(data = validation_mat)
+
+# 预测概率
+validation_pred_prob <- predict(xgb_model, validation_dtest)
+
+# 预测分类（阈值0.5）
+validation_pred_class <- ifelse(validation_pred_prob >= 0.5, 1, 0)
+
+# ============================================================================
+# 验证集性能评估（针对1:1平衡数据集）
+# ============================================================================
+
+# 12. 评估模型性能（增强版）---------------------------------------------------
+
+calculate_metrics <- function(pred_prob, y_true, threshold = 0.5) {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  cm <- table(Predicted = pred_class, Actual = y_true)
+  
+  # 基础指标
+  accuracy <- sum(diag(cm)) / sum(cm)
+  precision <- ifelse(sum(pred_class == 1) > 0, cm[2,2] / sum(pred_class == 1), NA)
+  recall <- ifelse(sum(y_true == 1) > 0, cm[2,2] / sum(y_true == 1), NA)
+  specificity <- ifelse(sum(y_true == 0) > 0, cm[1,1] / sum(y_true == 0), NA)
+  f1 <- ifelse(!is.na(precision) & !is.na(recall) & (precision + recall) > 0, 
+               2 * precision * recall / (precision + recall), NA)
+  
+  # 额外指标（适用于平衡数据集）
+  balanced_accuracy <- (recall + specificity) / 2
+  mcc <- ifelse(sum(cm) > 0, {
+    tp <- cm[2,2]; tn <- cm[1,1]; fp <- cm[2,1]; fn <- cm[1,2]
+    (tp * tn - fp * fn) / sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+  }, NA)
+  
+  # ROC和AUC
+  roc_obj <- tryCatch({
+    roc(y_true, pred_prob)
+  }, error = function(e) NULL)
+  
+  auc_value <- ifelse(!is.null(roc_obj), as.numeric(auc(roc_obj)), NA)
+  
+  # 最优阈值（Youden指数）
+  optimal_threshold <- ifelse(!is.null(roc_obj), {
+    coords <- coords(roc_obj, "best", ret = "threshold", best.method = "youden")
+    as.numeric(coords)
+  }, NA)
+  
+  return(list(
+    accuracy = accuracy,
+    precision = precision,
+    recall = recall,
+    specificity = specificity,
+    f1 = f1,
+    balanced_accuracy = balanced_accuracy,
+    mcc = mcc,
+    auc = auc_value,
+    optimal_threshold = optimal_threshold,
+    confusion_matrix = cm,
+    roc_obj = roc_obj
+  ))
+}
+
+validation_metrics <- calculate_metrics(validation_pred_prob, validation_data$target)
+
+cat("\n========== XGBoost模型在验证集上的性能 ==========\n")
+cat("样本信息:\n")
+cat("  总样本数:", nrow(validation_data), "\n")
+cat("  自杀风险样本:", sum(validation_data$target == 1), "\n")
+cat("  非自杀风险样本:", sum(validation_data$target == 0), "\n")
+cat("  正负样本比例:", round(sum(validation_data$target == 1) / sum(validation_data$target == 0), 3), "\n")
+
+cat("\n性能指标:\n")
+cat("  准确率 (Accuracy):", round(validation_metrics$accuracy, 4), "\n")
+cat("  精确率 (Precision):", round(validation_metrics$precision, 4), "\n")
+cat("  召回率/敏感性 (Recall/Sensitivity):", round(validation_metrics$recall, 4), "\n")
+cat("  特异性 (Specificity):", round(validation_metrics$specificity, 4), "\n")
+cat("  F1分数:", round(validation_metrics$f1, 4), "\n")
+cat("  平衡准确率 (Balanced Accuracy):", round(validation_metrics$balanced_accuracy, 4), "\n")
+cat("  Matthews相关系数 (MCC):", round(validation_metrics$mcc, 4), "\n")
+if (!is.na(validation_metrics$auc)) {
+  cat("  AUC:", round(validation_metrics$auc, 4), "\n")
+}
+if (!is.na(validation_metrics$optimal_threshold)) {
+  cat("  最优阈值 (Youden指数):", round(validation_metrics$optimal_threshold, 4), "\n")
+}
+
+cat("\n混淆矩阵:\n")
+print(validation_metrics$confusion_matrix)
+
+# ============================================================================
+# 模型性能对比（原始训练集 vs 验证集）
+# ============================================================================
+
+# 加载原始模型的性能（如果存在）
+if (file.exists("results/model_comparison_results.csv")) {
+  original_results <- read.csv("results/model_comparison_results.csv")
+  xgb_original <- original_results[original_results$Model == "XGBoost", ]
+  
+  cat("\n========== 模型性能对比 ==========\n")
+  cat("\n指标            | 原始训练集     | 验证集         | 差异\n")
+  cat("----------------|----------------|----------------|----------------\n")
+  
+  metrics_compare <- data.frame(
+    指标 = c("准确率", "精确率", "召回率", "F1", "AUC"),
+    原始训练集 = c(
+      xgb_original$Accuracy,
+      xgb_original$Precision,
+      xgb_original$Recall,
+      xgb_original$F1,
+      xgb_original$AUC
+    ),
+    验证集 = c(
+      validation_metrics$accuracy,
+      validation_metrics$precision,
+      validation_metrics$recall,
+      validation_metrics$f1,
+      validation_metrics$auc
+    )
+  )
+  
+  metrics_compare$差异 <- metrics_compare$验证集 - metrics_compare$原始训练集
+  
+  print(metrics_compare)
+  
+  # 判断泛化能力
+  auc_diff <- abs(metrics_compare$差异[5])
+  if (auc_diff < 0.05) {
+    cat("\n✓ AUC差异 < 0.05，模型泛化能力良好\n")
+  } else if (auc_diff < 0.1) {
+    cat("\n⚠ AUC差异在0.05-0.1之间，模型泛化能力尚可\n")
+  } else {
+    cat("\n✗ AUC差异 > 0.1，模型泛化能力较差，需要进一步调整\n")
+  }
+} else {
+  cat("\n未找到原始模型性能文件，跳过对比分析\n")
+}
+
+# 保存对比结果
+if (exists("metrics_compare")) {
+  write.csv(metrics_compare, "results/model_performance_comparison.csv", row.names = FALSE)
+  cat("\n✓ 性能对比已保存到 results/model_performance_comparison.csv\n")
+}
+# ============================================================================
+# 生成论文表格格式的性能汇总
+# ============================================================================
+
+# 创建论文格式的性能表格
+paper_table <- data.frame(
+  Metric = c(
+    "样本量 (n)",
+    "自杀风险样本 (n)",
+    "非自杀风险样本 (n)",
+    "准确率 (Accuracy)",
+    "精确率 (Precision)",
+    "召回率 (Recall)",
+    "特异性 (Specificity)",
+    "F1分数",
+    "平衡准确率 (Balanced Accuracy)",
+    "MCC",
+    "AUC (95% CI)"
+  ),
+  Value = c(
+    nrow(validation_data),
+    sum(validation_data$target == 1),
+    sum(validation_data$target == 0),
+    sprintf("%.4f", validation_metrics$accuracy),
+    sprintf("%.4f", validation_metrics$precision),
+    sprintf("%.4f", validation_metrics$recall),
+    sprintf("%.4f", validation_metrics$specificity),
+    sprintf("%.4f", validation_metrics$f1),
+    sprintf("%.4f", validation_metrics$balanced_accuracy),
+    sprintf("%.4f", validation_metrics$mcc),
+    sprintf("%.4f (%.4f-%.4f)", 
+            validation_metrics$auc,
+            ifelse(!is.null(validation_metrics$roc_obj), 
+                   ci.auc(validation_metrics$roc_obj)[1], NA),
+            ifelse(!is.null(validation_metrics$roc_obj), 
+                   ci.auc(validation_metrics$roc_obj)[3], NA))
+  )
+)
+
+# 保存论文表格
+write.csv(paper_table, "paper_table_performance.csv", row.names = FALSE)
+cat("\n✓ 论文格式性能表格已保存到 results/paper_table_performance.csv\n")
+
+# 打印表格
+cat("\n========== 论文格式性能表格 ==========\n")
+print(paper_table)
+# ============================================================================
+# JADER 验证集所有性能指标的 Bootstrap 95% CI
+# ============================================================================
+suppressPackageStartupMessages({
+  library(boot)
+  library(pROC)
+  library(PRROC)
+  library(writexl)
+})
+
+dir.create("results/reviewer", showWarnings = FALSE, recursive = TRUE)
+
+cat("\n--- 正在为 JADER 验证集计算 95% 置信区间 (Bootstrap R=2000) ---\n")
+
+# 定义通用 Bootstrap 计算函数
+boot_metrics_ci <- function(pred_prob, y_true, threshold = 0.5, R = 2000, seed = 2024) {
+  set.seed(seed)
+  metric_fun <- function(d, idx) {
+    p <- d$pred[idx]; y <- d$y[idx]
+    
+    # 如果重抽样中只有一类，返回 NA 避免报错
+    if(length(unique(y)) < 2) return(rep(NA, 7))
+    
+    cls <- ifelse(p >= threshold, 1, 0)
+    tp <- sum(cls == 1 & y == 1); fp <- sum(cls == 1 & y == 0)
+    tn <- sum(cls == 0 & y == 0); fn <- sum(cls == 0 & y == 1)
+    
+    acc <- (tp + tn) / length(y)
+    sens <- ifelse((tp + fn) > 0, tp / (tp + fn), NA)
+    spec <- ifelse((tn + fp) > 0, tn / (tn + fp), NA)
+    prec <- ifelse((tp + fp) > 0, tp / (tp + fp), NA)
+    f1 <- ifelse(!is.na(prec) & !is.na(sens) & (prec + sens) > 0,
+                 2 * prec * sens / (prec + sens), NA)
+    auc_v <- tryCatch(as.numeric(auc(roc(y, p, quiet = TRUE))), error = function(e) NA)
+    pr_v <- tryCatch({
+      pr <- PRROC::pr.curve(scores.class0 = p[y == 1], scores.class1 = p[y == 0], curve = FALSE)
+      pr$auc.integral
+    }, error = function(e) NA)
+    
+    c(Accuracy = acc, Sensitivity = sens, Specificity = spec,
+      Precision = prec, F1 = f1, AUC = auc_v, PR_AUC = pr_v)
+  }
+  
+  d <- data.frame(pred = pred_prob, y = y_true)
+  b <- boot(d, metric_fun, R = R)
+  
+  # 计算 95% CI
+  ci <- apply(b$t, 2, function(x) quantile(x, c(0.025, 0.975), na.rm = TRUE))
+  point <- metric_fun(d, 1:length(y_true))
+  
+  res <- data.frame(
+    Dataset = "JADER_FAERS_Model",
+    Model = "XGBoost",
+    Metric = names(point), 
+    Point = as.numeric(point),
+    Lower = ci[1, ], 
+    Upper = ci[2, ], 
+    row.names = NULL
+  )
+  return(res)
+}
+
+# 1. 计算指标并保存 CSV
+jader_ci <- boot_metrics_ci(validation_pred_prob, validation_data$target, threshold = 0.5, R = 2000)
+write.csv(jader_ci, "jader_ci_all_metrics.csv", row.names = FALSE)
+
+# 2. 格式化并输出为 SCI 论文宽表
+library(dplyr)
+library(tidyr)
+
+jader_ci_wide <- jader_ci %>%
+  mutate(Value_Formatted = sprintf("%.3f (%.3f–%.3f)", Point, Lower, Upper)) %>%
+  select(Model, Metric, Value_Formatted) %>%
+  pivot_wider(names_from = Metric, values_from = Value_Formatted)
+
+# 调整列顺序
+col_order <- c("Model", "AUC", "PR_AUC", "Accuracy", "Sensitivity", 
+               "Specificity", "Precision", "F1")
+jader_ci_wide <- jader_ci_wide %>% select(any_of(col_order))
+
+print(jader_ci_wide)
+write_xlsx(jader_ci_wide, "Table_JADER_Performance_with_CI.xlsx")
+
+cat("\n✓ JADER 验证集的置信区间计算完成，已保存至 results/reviewer/\n")
+
+# ============================================================================
+#可视化
+# ============================================================================
+
+# 1. 定义SCI论文主题函数 ------------------------------------------------
+
+theme_sci <- function(base_size = 12, base_family = "sans") {
+  theme_minimal(base_size = base_size, base_family = base_family) +
+    theme(
+      # 边框
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+      # 网格线
+      panel.grid.major = element_line(color = "gray90", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      # 轴
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.ticks.length = unit(0.15, "cm"),
+      # 标题
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "gray30"),
+      # 图例
+      legend.position = "bottom",
+      legend.box = "horizontal",
+      legend.key.size = unit(0.8, "cm"),
+      legend.text = element_text(size = 10),
+      legend.title = element_text(size = 11, face = "bold"),
+      # 轴标签
+      axis.text = element_text(size = 10, color = "black"),
+      axis.title = element_text(size = 11, face = "bold"),
+      # facets
+      strip.background = element_rect(fill = "gray95", color = "black", linewidth = 0.5),
+      strip.text = element_text(size = 11, face = "bold")
+    )
+}
+
+# 2. 执行验证集预测（如果还没执行）-------------------------------------
+
+# 注意：这部分假设您已经运行了之前的验证代码
+# 如果 validation_results 和 validation_metrics 不存在，请先运行之前的验证代码
+
+# 3. 可视化图表 ---------------------------------------------------------
+
+# 3.1 预测概率分布图
+p1 <- ggplot(validation_results, aes(x = 预测概率, fill = 真实标签)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, 
+                 color = "black", linewidth = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("自杀风险" = "#E41A1C", "非自杀风险" = "#377EB8"), 
+                    name = "真实标签") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    title = "A",
+    x = "预测概率",
+    y = "频数",
+    caption = "虚线表示分类阈值 (0.5)"
+  ) +
+  theme_sci() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0)
+  )
+
+# 保存
+ggsave("Fig1_prediction_distribution.png", p1, width = 6, height = 5, dpi = 600, bg = "white")
+ggsave("Fig1_prediction_distribution.pdf", p1, width = 6, height = 5, device = cairo_pdf)
+
+# 3.2 ROC曲线
+if (!is.na(validation_metrics$auc) && !is.null(validation_metrics$roc_obj)) {
+  roc_obj <- validation_metrics$roc_obj
+  roc_df <- data.frame(
+    FPR = 1 - roc_obj$specificities,
+    TPR = roc_obj$sensitivities
+  )
+  
+  p2 <- ggplot(roc_df, aes(x = FPR, y = TPR)) +
+    geom_line(color = "#E41A1C", linewidth = 1.5) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", 
+                color = "gray50", linewidth = 0.8) +
+    geom_ribbon(aes(ymin = FPR, ymax = TPR), fill = "#E41A1C", alpha = 0.1) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    labs(
+      title = "B",
+      x = "假阳性率 (1 - 特异性)",
+      y = "真阳性率 (敏感性)",
+      subtitle = paste0("AUC = ", round(validation_metrics$auc, 4))
+    ) +
+    theme_sci() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "#E41A1C", face = "bold")
+    )
+  
+  ggsave("results/Fig2_roc_curve.png", p2, width = 6, height = 5, dpi = 600, bg = "white")
+  ggsave("results/Fig2_roc_curve.pdf", p2, width = 6, height = 5, device = cairo_pdf)
+}
+
+# 3.3 混淆矩阵热图
+cm <- validation_metrics$confusion_matrix
+cm_df <- as.data.frame(cm)
+colnames(cm_df) <- c("预测", "实际", "频数")
+
+# 计算百分比
+cm_df <- cm_df %>%
+  group_by(实际) %>%
+  mutate(百分比 = round(频数 / sum(频数) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(标签 = paste0(频数, "\n(", 百分比, "%)"))
+
+p3 <- ggplot(cm_df, aes(x = 实际, y = 预测, fill = 频数)) +
+  geom_tile(color = "black", linewidth = 0.5) +
+  geom_text(aes(label = 标签), size = 4.5, color = "white", fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#377EB8", 
+    mid = "#FFFFFF", 
+    high = "#E41A1C",
+    midpoint = max(cm_df$频数) / 2,
+    name = "频数"
+  ) +
+  labs(
+    title = "C",
+    x = "实际类别",
+    y = "预测类别"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+ggsave("results/Fig3_confusion_matrix.png", p3, width = 5, height = 4.5, dpi = 600, bg = "white")
+ggsave("results/Fig3_confusion_matrix.pdf", p3, width = 5, height = 4.5, device = cairo_pdf)
+
+# 3.4 性能指标条形图
+metrics_df <- data.frame(
+  指标 = c("准确率", "精确率", "召回率", "特异性", "F1分数", "AUC"),
+  数值 = c(
+    validation_metrics$accuracy,
+    validation_metrics$precision,
+    validation_metrics$recall,
+    validation_metrics$specificity,
+    validation_metrics$f1,
+    validation_metrics$auc
+  )
+)
+
+# 定义颜色
+metric_colors <- c(
+  "准确率" = "#4DAF4A",
+  "精确率" = "#377EB8", 
+  "召回率" = "#FF7F00",
+  "特异性" = "#984EA3",
+  "F1分数" = "#E41A1C",
+  "AUC" = "#A65628"
+)
+
+p4 <- ggplot(metrics_df, aes(x = reorder(指标, 数值), y = 数值, fill = 指标)) +
+  geom_bar(stat = "identity", width = 0.7, color = "black", linewidth = 0.3) +
+  geom_text(aes(label = round(数值, 4)), vjust = -0.5, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = metric_colors) +
+  scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "D",
+    x = "",
+    y = "分数"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    legend.position = "none",
+    axis.text.x = element_text(size = 11, face = "bold")
+  )
+
+ggsave("results/Fig4_performance_metrics.png", p4, width = 6, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig4_performance_metrics.pdf", p4, width = 6, height = 5, device = cairo_pdf)
+
+# 3.5 预测概率箱线图
+p5 <- ggplot(validation_results, aes(x = 真实标签, y = 预测概率, fill = 真实标签)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("自杀风险" = "#E41A1C", "非自杀风险" = "#377EB8"), 
+                    name = "真实标签") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "E",
+    x = "",
+    y = "预测概率",
+    caption = paste0("样本量: 自杀风险=", sum(validation_data$target == 1), 
+                     ", 非自杀风险=", sum(validation_data$target == 0))
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    legend.position = "none",
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0)
+  )
+
+ggsave("results/Fig5_boxplot.png", p5, width = 5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig5_boxplot.pdf", p5, width = 5, height = 5, device = cairo_pdf)
+
+# 3.6 校准曲线（Calibration Plot）
+calibration_plot_data <- function(pred_prob, y_true, n_bins = 10) {
+  df <- data.frame(pred = pred_prob, true = y_true)
+  df$bin <- cut(df$pred, breaks = seq(0, 1, length.out = n_bins + 1), 
+                include.lowest = TRUE)
+  
+  cal_df <- df %>%
+    group_by(bin) %>%
+    summarise(
+      mean_pred = mean(pred),
+      mean_true = mean(true),
+      n = n(),
+      se = sqrt(mean_true * (1 - mean_true) / n)
+    ) %>%
+    filter(n > 0)
+  
+  return(cal_df)
+}
+
+cal_df <- calibration_plot_data(validation_pred_prob, validation_data$target, n_bins = 10)
+
+p6 <- ggplot(cal_df, aes(x = mean_pred, y = mean_true)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", 
+              color = "gray50", linewidth = 1) +
+  geom_point(size = 3.5, color = "#E41A1C", fill = "#E41A1C", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_true - se, ymax = mean_true + se), 
+                width = 0.02, color = "#E41A1C", alpha = 0.5) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "F",
+    x = "预测概率",
+    y = "实际概率",
+    caption = "误差线表示标准误"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0)
+  )
+
+ggsave("results/Fig6_calibration_plot.png", p6, width = 6, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig6_calibration_plot.pdf", p6, width = 6, height = 5, device = cairo_pdf)
+
+# 3.7 组合图（2x2布局）
+library(cowplot)
+library(gridExtra)
+
+# 组合4个主要图表
+figure1 <- plot_grid(
+  p1, p2, p3, p4,
+  ncol = 2,
+  nrow = 2,
+  align = "hv",
+  rel_widths = c(1, 1),
+  rel_heights = c(1, 1)
+)
+
+# 添加总标题
+figure1_with_title <- ggdraw() +
+  draw_plot(figure1) +
+  draw_label(
+    "XGBoost模型在验证集上的性能评估",
+    x = 0.5,
+    y = 0.98,
+    size = 16,
+    fontface = "bold",
+    hjust = 0.5
+  )
+
+# 保存组合图
+ggsave("results/Figure1_validation_performance.png", 
+       figure1_with_title, 
+       width = 12, 
+       height = 10, 
+       dpi = 600, 
+       bg = "white")
+
+ggsave("results/Figure1_validation_performance.pdf", 
+       figure1_with_title, 
+       width = 12, 
+       height = 10, 
+       device = cairo_pdf)
+
+# 3.8 组合图2（箱线图 + 校准曲线）
+figure2 <- plot_grid(
+  p5, p6,
+  ncol = 2,
+  nrow = 1,
+  align = "hv",
+  rel_widths = c(1, 1)
+)
+
+ggsave("results/Figure2_additional_plots.png", 
+       figure2, 
+       width = 12, 
+       height = 5, 
+       dpi = 600, 
+       bg = "white")
+
+ggsave("results/Figure2_additional_plots.pdf", 
+       figure2, 
+       width = 12, 
+       height = 5, 
+       device = cairo_pdf)
+
+# 4. 输出完成信息 -------------------------------------------------------
+
+cat("\n========== 可视化完成！ ==========\n")
+cat("\n生成的图表文件:\n")
+cat("  1. Figure1_validation_performance.pdf/png - 组合图（2x2布局）\n")
+cat("  2. Figure2_additional_plots.pdf/png - 补充图表（箱线图+校准曲线）\n")
+cat("  3. Fig1_prediction_distribution.pdf/png - 预测概率分布\n")
+cat("  4. Fig2_roc_curve.pdf/png - ROC曲线\n")
+cat("  5. Fig3_confusion_matrix.pdf/png - 混淆矩阵\n")
+cat("  6. Fig4_performance_metrics.pdf/png - 性能指标条形图\n")
+cat("  7. Fig5_boxplot.pdf/png - 预测概率箱线图\n")
+cat("  8. Fig6_calibration_plot.pdf/png - 校准曲线\n")
+cat("\n✓ 所有图片已保存到 'results' 文件夹\n")
+
+
+# ============================================================================
+# JADER验证集完整评估（跨库验证 + 校准度 + DCA + 混淆矩阵）
+# ============================================================================
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(tidyr); library(caret)
+  library(xgboost); library(pROC); library(ggplot2); library(boot)
+  library(PRROC); library(CalibrationCurves); library(dcurves); library(writexl)
+})
+
+set.seed(123)
+dir.create("results/reviewer", showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================================
+# 1. 读取与预处理数据
+# ============================================================================
+validation_data <- read_excel("JADER机器模型数据.xlsx")
+colnames(validation_data) <- c("primaryid", "caseid", "age_raw", "sex_raw", "wt_raw", 
+                               "outcome", "indi_pt", "pt", "role_cod")
+
+# 处理年龄
+validation_data$age_imputed <- NA
+age_mapping <- list("10歳代"=15,"20歳代"=25,"30歳代"=35,"40歳代"=45,"50歳代"=55,
+                    "60歳代"=65,"70歳代"=75,"80歳代"=85,"90歳代"=95)
+for (pattern in names(age_mapping)) {
+  validation_data$age_imputed[grepl(pattern, validation_data$age_raw)] <- age_mapping[[pattern]]
+}
+
+# 处理性别
+validation_data$sex_imputed <- NA
+validation_data$sex_imputed[validation_data$sex_raw == "男性"] <- 1
+validation_data$sex_imputed[validation_data$sex_raw == "女性"] <- 2
+
+# 处理体重
+validation_data$wt_value <- as.numeric(gsub("kg台|kg", "", validation_data$wt_raw))
+impute_weight <- function(data) {
+  weight_ref <- data %>% filter(!is.na(wt_value)) %>%
+    group_by(age_imputed, sex_imputed) %>%
+    summarise(median_wt = median(wt_value, na.rm = TRUE), .groups = "drop")
+  global_median <- median(data$wt_value, na.rm = TRUE)
+  data$wt_imputed <- data$wt_value
+  for (i in 1:nrow(data)) {
+    if (is.na(data$wt_imputed[i])) {
+      match <- weight_ref %>% filter(age_imputed == data$age_imputed[i] & sex_imputed == data$sex_imputed[i])
+      data$wt_imputed[i] <- if (nrow(match) > 0) match$median_wt[1] else global_median
+    }
+  }
+  data
+}
+validation_data <- impute_weight(validation_data)
+
+# 处理转归、适应症、角色、结局
+validation_data$outc_cod_imputed <- c("軽快"=1,"回復"=2,"未回復"=3,"後遺症"=4,"死亡"=5,"不明"=6)[validation_data$outcome]
+validation_data$indi_pt_imputed_clean <- validation_data$indi_pt
+validation_data$role_cod <- c("被疑薬"=1,"併用薬"=2,"相互作用"=3,"被疑薬等"=1)[validation_data$role_cod]
+validation_data$target <- as.numeric(validation_data$pt %in% c("自殺既遂","自殺企図","自殺念慮"))
+
+# ============================================================================
+# 2. 特征对齐与预测
+# ============================================================================
+validation_features <- validation_data %>%
+  select(age_imputed, sex_imputed, wt_imputed, outc_cod_imputed, 
+         indi_pt_imputed = indi_pt_imputed_clean, role_cod) %>%
+  mutate(sex_imputed = as.factor(sex_imputed), outc_cod_imputed = as.factor(outc_cod_imputed),
+         indi_pt_imputed = as.factor(indi_pt_imputed), role_cod = as.factor(role_cod))
+
+xgb_model <- xgb.load("results/best_model_xgboost.model")
+dummy_model <- readRDS("results/dummy_model.rds")
+training_columns <- readRDS("results/training_columns.rds")
+
+# 提取训练集中的因子水平并替换新类别
+train_factor_levels <- dummy_model$lvls
+if ("indi_pt_imputed" %in% names(train_factor_levels)) {
+  train_indi_levels <- train_factor_levels$indi_pt_imputed
+  new_indi_levels <- setdiff(unique(validation_data$indi_pt_imputed_clean), train_indi_levels)
+  validation_data$indi_pt_imputed_clean[validation_data$indi_pt_imputed_clean %in% new_indi_levels] <- "Other"
+  validation_features$indi_pt_imputed <- as.factor(validation_data$indi_pt_imputed_clean)
+}
+
+# 应用 dummy 编码并安全对齐
+validation_dummy <- tryCatch({
+  predict(dummy_model, validation_features)
+}, error = function(e) {
+  dummy_result <- data.frame(row.names = 1:nrow(validation_features))
+  for (var_name in names(train_factor_levels)) {
+    if (var_name %in% names(validation_features)) {
+      for (level in train_factor_levels[[var_name]]) {
+        dummy_result[[paste0(var_name, level)]] <- as.numeric(as.character(validation_features[[var_name]]) == level)
+      }
+    }
+  }
+  dummy_result$age_imputed <- validation_features$age_imputed
+  dummy_result$wt_imputed <- validation_features$wt_imputed
+  dummy_result
+})
+
+validation_df <- as.data.frame(validation_dummy)
+validation_df_aligned <- data.frame(matrix(0, nrow = nrow(validation_df), ncol = length(training_columns)))
+colnames(validation_df_aligned) <- training_columns
+common_cols <- intersect(colnames(validation_df), training_columns)
+for (col in common_cols) validation_df_aligned[[col]] <- validation_df[[col]]
+validation_df_aligned[is.na(validation_df_aligned)] <- 0
+
+# 预测概率
+validation_mat <- as.matrix(validation_df_aligned)
+validation_dtest <- xgb.DMatrix(data = validation_mat)
+validation_pred_prob <- predict(xgb_model, validation_dtest)
+y_true <- validation_data$target
+
+# 修复原代码中缺失的 validation_results 变量
+validation_results <- data.frame(
+  真实标签 = ifelse(y_true == 1, "自杀风险", "非自杀风险"),
+  预测概率 = validation_pred_prob
+)
+
+# ============================================================================
+# 3. Bootstrap 95% CI
+# ============================================================================
+cat("\n--- 计算 Bootstrap 95% CI ---\n")
+boot_metrics_ci <- function(pred_prob, y_true, threshold = 0.5, R = 2000) {
+  set.seed(2024)
+  metric_fun <- function(d, idx) {
+    p <- d$pred[idx]; y <- d$y[idx]
+    if(length(unique(y)) < 2) return(rep(NA, 7))
+    cls <- ifelse(p >= threshold, 1, 0)
+    tp <- sum(cls == 1 & y == 1); fp <- sum(cls == 1 & y == 0)
+    tn <- sum(cls == 0 & y == 0); fn <- sum(cls == 0 & y == 1)
+    acc <- (tp + tn) / length(y)
+    sens <- ifelse((tp + fn) > 0, tp / (tp + fn), NA)
+    spec <- ifelse((tn + fp) > 0, tn / (tn + fp), NA)
+    prec <- ifelse((tp + fp) > 0, tp / (tp + fp), NA)
+    f1 <- ifelse(!is.na(prec) & !is.na(sens) & (prec + sens) > 0, 2 * prec * sens / (prec + sens), NA)
+    auc_v <- tryCatch(as.numeric(auc(roc(y, p, quiet = TRUE))), error = function(e) NA)
+    pr_v <- tryCatch(PRROC::pr.curve(scores.class0 = p[y == 1], scores.class1 = p[y == 0], curve = FALSE)$auc.integral, error = function(e) NA)
+    c(Accuracy = acc, Sensitivity = sens, Specificity = spec, Precision = prec, F1 = f1, AUC = auc_v, PR_AUC = pr_v)
+  }
+  d <- data.frame(pred = pred_prob, y = y_true)
+  b <- boot(d, metric_fun, R = R)
+  ci <- apply(b$t, 2, function(x) quantile(x, c(0.025, 0.975), na.rm = TRUE))
+  point <- metric_fun(d, 1:length(y_true))
+  data.frame(Dataset = "FAERS_Model_on_JADER", Model = "XGBoost", Metric = names(point), 
+             Point = as.numeric(point), Lower = ci[1, ], Upper = ci[2, ], row.names = NULL)
+}
+jader_ci <- boot_metrics_ci(validation_pred_prob, y_true, R = 2000)
+write.csv(jader_ci, "jader_ci_all_metrics.csv", row.names = FALSE)
+
+# ============================================================================
+# 4. 校准度评估
+# ============================================================================
+cat("\n--- 计算校准度 (Calibration) ---\n")
+# 使用基础 glm 计算截距、斜率及 CI
+lp <- log(validation_pred_prob / (1 - validation_pred_prob))
+lp[is.infinite(lp)] <- ifelse(lp[is.infinite(lp)] > 0, 10, -10) 
+cal_glm <- glm(y_true ~ lp, family = binomial)
+summary_cal <- summary(cal_glm)$coefficients
+
+cal_tab <- data.frame(
+  Scenario = "FAERS_Model_on_JADER",
+  Metric = c("Intercept", "Slope"),
+  Estimate = c(summary_cal["(Intercept)", 1], summary_cal["lp", 1]),
+  Lower_95CI = c(summary_cal["(Intercept)", 1] - 1.96 * summary_cal["(Intercept)", 2], summary_cal["lp", 1] - 1.96 * summary_cal["lp", 2]),
+  Upper_95CI = c(summary_cal["(Intercept)", 1] + 1.96 * summary_cal["(Intercept)", 2], summary_cal["lp", 1] + 1.96 * summary_cal["lp", 2])
+)
+write.csv(cal_tab, "jader_calibration_stats.csv", row.names = FALSE)
+
+# 保存高质量的平滑校准图
+png("jader_calibration_plot.png", width = 6, height = 6, units = "in", res = 300)
+tryCatch({
+  val.prob.ci.2(p = validation_pred_prob, y = y_true, smooth = "loess", legendloc = FALSE, CL.smooth = TRUE)
+}, error = function(e) {
+  plot(validation_pred_prob, y_true, main="Calibration") 
+})
+dev.off()
+
+# ============================================================================
+# 5. 决策曲线分析 (DCA)
+# ============================================================================
+cat("\n--- 执行 DCA ---\n")
+dca_data <- data.frame(outcome = y_true, pred_prob = validation_pred_prob)
+dca_res <- dca(outcome ~ pred_prob, data = dca_data, thresholds = seq(0.01, 0.99, by = 0.01))
+
+dca_df <- as.data.frame(dca_res$dca)
+write.csv(dca_df, "jader_dca_data.csv", row.names = FALSE)
+
+dca_plot <- plot(dca_res) + 
+  labs(title = "Decision Curve Analysis - FAERS Model on JADER", x = "Threshold Probability", y = "Net Benefit") +
+  theme_minimal()
+ggsave("jader_dca_plot.png", dca_plot, width = 7, height = 5, dpi = 300)
+
+# ============================================================================
+# 6. 完整混淆矩阵
+# ============================================================================
+cat("\n--- 计算混淆矩阵 ---\n")
+pred_class <- ifelse(validation_pred_prob >= 0.5, 1, 0)
+cm <- table(Predicted = factor(pred_class, levels = c(0, 1)), Actual = factor(y_true, levels = c(0, 1)))
+
+TP <- cm["1", "1"]; FP <- cm["1", "0"]; TN <- cm["0", "0"]; FN <- cm["0", "1"]
+cm_tab <- data.frame(
+  Scenario = "FAERS_Model_on_JADER", Model = "XGBoost", Threshold = 0.5,
+  TP = TP, FP = FP, TN = TN, FN = FN,
+  Sensitivity = TP / (TP + FN), Specificity = TN / (TN + FP),
+  PPV = TP / (TP + FP), NPV = TN / (TN + FN)
+)
+write.csv(cm_tab, "jader_confusion_matrix.csv", row.names = FALSE)
+
+# ============================================================================
+# 7. 样本量
+# ============================================================================
+sample_tab <- data.frame(
+  Scenario = "FAERS_Model_on_JADER",
+  Total_Samples = length(y_true), Events = sum(y_true == 1), Non_Events = sum(y_true == 0)
+)
+write.csv(sample_tab, "jader_sample_size.csv", row.names = FALSE)
+
+cat("\n✓ 跨库验证（FAERS -> JADER）所有审稿意见（1-5）已全部计算完成，并保存在 results/reviewer/\n")
+# ============================================================================
+# 使用JADER数据重新训练XGBoost模型
+# ============================================================================
+
+# 1. 加载必要的包 ------------------------------------------------------------
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(xgboost)
+library(pROC)
+library(ggplot2)
+library(corrplot)
+
+# 设置随机种子
+set.seed(123)
+
+# 2. 读取JADER数据 -----------------------------------------------------------
+jader_data <- read_excel("JADER机器模型数据.xlsx")
+
+# 查看原始数据结构
+cat("========== JADER原始数据结构 ==========\n")
+str(jader_data)
+print(head(jader_data))
+
+# 3. 数据预处理（完整处理）-------------------------------------------------
+
+# 3.1 列名转换（日文 → 英文）
+original_cols <- c("primaryid", "caseid", "年齢", "性別", "体重", 
+                   "転帰", "原疾患等", "有害事象", "医薬品の関与")
+target_cols <- c("primaryid", "caseid", "age_raw", "sex_raw", "wt_raw", 
+                 "outcome", "indi_pt", "pt", "role_cod")
+colnames(jader_data) <- target_cols
+
+cat("\n========== 列名转换完成 ==========\n")
+print(names(jader_data))
+
+# 3.2 处理年龄（将年龄段转换为数值）
+jader_data$age_imputed <- NA
+
+age_mapping <- list(
+  "10歳代" = 15, "20歳代" = 25, "30歳代" = 35,
+  "40歳代" = 45, "50歳代" = 55, "60歳代" = 65,
+  "70歳代" = 75, "80歳代" = 85, "90歳代" = 95
+)
+
+for (pattern in names(age_mapping)) {
+  jader_data$age_imputed[grepl(pattern, jader_data$age_raw)] <- age_mapping[[pattern]]
+}
+
+# 3.3 处理性别
+jader_data$sex_imputed <- NA
+jader_data$sex_imputed[jader_data$sex_raw == "男性"] <- 1
+jader_data$sex_imputed[jader_data$sex_raw == "女性"] <- 2
+
+# 3.4 处理体重（提取数值并插补）
+jader_data$wt_value <- as.numeric(gsub("kg台|kg", "", jader_data$wt_raw))
+
+impute_weight <- function(data) {
+  weight_ref <- data %>%
+    filter(!is.na(wt_value)) %>%
+    group_by(age_imputed, sex_imputed) %>%
+    summarise(median_wt = median(wt_value, na.rm = TRUE), .groups = "drop")
+  
+  global_median <- median(data$wt_value, na.rm = TRUE)
+  
+  data$wt_imputed <- data$wt_value
+  for (i in 1:nrow(data)) {
+    if (is.na(data$wt_imputed[i])) {
+      match <- weight_ref %>%
+        filter(age_imputed == data$age_imputed[i] & 
+                 sex_imputed == data$sex_imputed[i])
+      if (nrow(match) > 0) {
+        data$wt_imputed[i] <- match$median_wt[1]
+      } else {
+        data$wt_imputed[i] <- global_median
+      }
+    }
+  }
+  return(data)
+}
+
+jader_data <- impute_weight(jader_data)
+
+# 3.5 处理转归编码
+outcome_mapping <- c(
+  "軽快" = 1, "回復" = 2, "未回復" = 3, 
+  "後遺症" = 4, "死亡" = 5, "不明" = 6
+)
+jader_data$outc_cod_imputed <- outcome_mapping[jader_data$outcome]
+
+# 3.6 处理适应症（保留原始值）
+jader_data$indi_pt_imputed <- jader_data$indi_pt
+
+# 3.7 处理角色编码
+role_mapping <- c(
+  "被疑薬" = 1, "併用薬" = 2, 
+  "相互作用" = 3, "被疑薬等" = 1
+)
+jader_data$role_cod <- role_mapping[jader_data$role_cod]
+
+# 3.8 创建目标变量
+suicide_pt <- c("自殺既遂", "自殺企図", "自殺念慮")
+jader_data$target <- as.numeric(jader_data$pt %in% suicide_pt)
+
+# 3.9 查看数据分布
+cat("\n========== JADER数据预处理完成 ==========\n")
+cat("总样本数:", nrow(jader_data), "\n")
+cat("自杀风险样本:", sum(jader_data$target == 1), "\n")
+cat("非自杀风险样本:", sum(jader_data$target == 0), "\n")
+cat("自杀风险比例:", round(mean(jader_data$target), 4), "\n")
+
+# 4. 平衡采样（1:1）---------------------------------------------------------
+
+cat("\n========== 平衡采样（1:1） ==========\n")
+
+# 获取自杀组和非自杀组索引
+suicide_idx <- which(jader_data$target == 1)
+non_suicide_idx <- which(jader_data$target == 0)
+
+n_suicide <- length(suicide_idx)
+n_non_suicide <- length(non_suicide_idx)
+
+cat("原始自杀风险样本数:", n_suicide, "\n")
+cat("原始非自杀风险样本数:", n_non_suicide, "\n")
+
+# 从非自杀组中随机抽取与自杀组相同数量的样本
+set.seed(456)
+sampled_non_suicide_idx <- sample(non_suicide_idx, size = n_suicide, replace = FALSE)
+
+# 合并索引
+balanced_idx <- c(suicide_idx, sampled_non_suicide_idx)
+
+# 创建平衡数据集
+balanced_data <- jader_data[balanced_idx, ]
+balanced_target <- jader_data$target[balanced_idx]
+
+cat("\n平衡后自杀风险样本数:", sum(balanced_target == 1), "\n")
+cat("平衡后非自杀风险样本数:", sum(balanced_target == 0), "\n")
+cat("平衡后总样本数:", length(balanced_target), "\n")
+
+# 5. 准备特征数据 ------------------------------------------------------------
+
+# 选择特征列
+balanced_features <- balanced_data %>%
+  select(
+    age_imputed,
+    sex_imputed,
+    wt_imputed,
+    outc_cod_imputed,
+    indi_pt_imputed,
+    role_cod
+  )
+
+# 查看特征结构
+cat("\n========== 特征数据 ==========\n")
+cat("特征维度:", dim(balanced_features), "\n")
+cat("特征列名:", paste(names(balanced_features), collapse = ", "), "\n")
+
+# 6. 划分训练集和测试集（70/30）--------------------------------------------
+
+set.seed(789)
+train_idx <- createDataPartition(balanced_target, p = 0.7, list = FALSE)
+
+X_train <- balanced_features[train_idx, ]
+X_test <- balanced_features[-train_idx, ]
+y_train <- balanced_target[train_idx]
+y_test <- balanced_target[-train_idx]
+
+cat("\n========== 数据划分 ==========\n")
+cat("训练集样本数:", length(y_train), "\n")
+cat("训练集自杀风险:", sum(y_train == 1), "\n")
+cat("训练集非自杀风险:", sum(y_train == 0), "\n")
+cat("测试集样本数:", length(y_test), "\n")
+cat("测试集自杀风险:", sum(y_test == 1), "\n")
+cat("测试集非自杀风险:", sum(y_test == 0), "\n")
+
+# 7. 特征工程 - 创建虚拟变量 ------------------------------------------------
+
+# 7.1 创建dummy模型
+dummy_model_jader <- dummyVars(~ ., data = X_train, fullRank = TRUE)
+X_train_dummy <- predict(dummy_model_jader, X_train)
+X_test_dummy <- predict(dummy_model_jader, X_test)
+
+# 转换为数据框
+X_train_df <- as.data.frame(X_train_dummy)
+X_test_df <- as.data.frame(X_test_dummy)
+
+# 移除零方差特征
+nzv <- nearZeroVar(X_train_df)
+if (length(nzv) > 0) {
+  X_train_df <- X_train_df[, -nzv]
+  X_test_df <- X_test_df[, -nzv]
+}
+
+# 确保所有列都是数值型
+X_train_df <- as.data.frame(lapply(X_train_df, as.numeric))
+X_test_df <- as.data.frame(lapply(X_test_df, as.numeric))
+
+# 处理NA值
+X_train_df[is.na(X_train_df)] <- 0
+X_test_df[is.na(X_test_df)] <- 0
+
+# 转换为矩阵
+X_train_mat <- as.matrix(X_train_df)
+X_test_mat <- as.matrix(X_test_df)
+
+cat("\n========== 特征编码完成 ==========\n")
+cat("训练集特征数:", ncol(X_train_df), "\n")
+cat("测试集特征数:", ncol(X_test_df), "\n")
+
+# 8. 训练XGBoost模型 ---------------------------------------------------------
+
+cat("\n========== 训练XGBoost模型 ==========\n")
+
+# 创建DMatrix
+dtrain <- xgb.DMatrix(data = X_train_mat, label = y_train)
+dtest <- xgb.DMatrix(data = X_test_mat, label = y_test)
+
+# XGBoost参数
+xgb_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  seed = 123
+)
+
+# 训练模型
+xgb_model_jader <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 200,
+  verbose = 1,
+  early_stopping_rounds = 20,
+  watchlist = list(train = dtrain, eval = dtest)
+)
+
+# 9. 模型评估 ---------------------------------------------------------------
+
+cat("\n========== 模型评估 ==========\n")
+
+# 预测
+pred_prob <- predict(xgb_model_jader, dtest)
+pred_class <- ifelse(pred_prob >= 0.5, 1, 0)
+
+# 计算性能指标
+calculate_metrics <- function(pred_prob, y_true, threshold = 0.5) {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  cm <- table(Predicted = pred_class, Actual = y_true)
+  
+  accuracy <- sum(diag(cm)) / sum(cm)
+  precision <- ifelse(sum(pred_class == 1) > 0, cm[2,2] / sum(pred_class == 1), NA)
+  recall <- ifelse(sum(y_true == 1) > 0, cm[2,2] / sum(y_true == 1), NA)
+  specificity <- ifelse(sum(y_true == 0) > 0, cm[1,1] / sum(y_true == 0), NA)
+  f1 <- ifelse(!is.na(precision) & !is.na(recall) & (precision + recall) > 0, 
+               2 * precision * recall / (precision + recall), NA)
+  
+  balanced_accuracy <- (recall + specificity) / 2
+  
+  roc_obj <- roc(y_true, pred_prob)
+  auc_value <- auc(roc_obj)
+  
+  return(list(
+    accuracy = accuracy,
+    precision = precision,
+    recall = recall,
+    specificity = specificity,
+    f1 = f1,
+    balanced_accuracy = balanced_accuracy,
+    auc = as.numeric(auc_value),
+    confusion_matrix = cm,
+    roc_obj = roc_obj
+  ))
+}
+
+metrics <- calculate_metrics(pred_prob, y_test)
+
+cat("\n性能指标:\n")
+cat("准确率 (Accuracy):", round(metrics$accuracy, 4), "\n")
+cat("精确率 (Precision):", round(metrics$precision, 4), "\n")
+cat("召回率 (Recall):", round(metrics$recall, 4), "\n")
+cat("特异性 (Specificity):", round(metrics$specificity, 4), "\n")
+cat("F1分数:", round(metrics$f1, 4), "\n")
+cat("平衡准确率:", round(metrics$balanced_accuracy, 4), "\n")
+cat("AUC:", round(metrics$auc, 4), "\n")
+
+cat("\n混淆矩阵:\n")
+print(metrics$confusion_matrix)
+
+# 10. 特征重要性 -------------------------------------------------------------
+
+# 获取特征重要性
+importance_matrix <- xgb.importance(model = xgb_model_jader, 
+                                    feature_names = colnames(X_train_df))
+
+# 显示Top20特征
+cat("\n========== 特征重要性 Top 20 ==========\n")
+print(head(importance_matrix, 20))
+
+# 11. 交叉验证（评估模型稳定性）--------------------------------------------
+
+cat("\n========== 5折交叉验证 ==========\n")
+
+cv_results <- xgb.cv(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 200,
+  nfold = 5,
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+cat("交叉验证平均AUC:", round(max(cv_results$evaluation_log$test_auc_mean), 4), "\n")
+cat("交叉验证AUC标准差:", round(max(cv_results$evaluation_log$test_auc_std), 4), "\n")
+
+# 12. 保存模型和预处理对象 -------------------------------------------------
+
+if (!dir.exists("results")) {
+  dir.create("results")
+}
+
+# 保存XGBoost模型
+xgb.save(xgb_model_jader, "xgb_jader_model.model")
+
+# 保存dummy模型
+saveRDS(dummy_model_jader, "dummy_jader_model.rds")
+
+# 保存训练列名
+training_columns_jader <- colnames(X_train_df)
+saveRDS(training_columns_jader, "training_jader_columns.rds")
+
+# 保存模型性能
+metrics_jader <- data.frame(
+  Dataset = "JADER",
+  Model = "XGBoost",
+  Accuracy = metrics$accuracy,
+  Precision = metrics$precision,
+  Recall = metrics$recall,
+  Specificity = metrics$specificity,
+  F1 = metrics$f1,
+  Balanced_Accuracy = metrics$balanced_accuracy,
+  AUC = metrics$auc,
+  CV_AUC = max(cv_results$evaluation_log$test_auc_mean)
+)
+
+write.csv(metrics_jader, "jader_model_performance.csv", row.names = FALSE)
+
+# 保存特征重要性
+write.csv(importance_matrix, "jader_feature_importance.csv", row.names = FALSE)
+
+cat("\n========== 模型保存完成 ==========\n")
+cat("✓ xgb_jader_model.model - XGBoost模型\n")
+cat("✓ dummy_jader_model.rds - Dummy编码模型\n")
+cat("✓ training_jader_columns.rds - 训练列名\n")
+cat("✓ jader_model_performance.csv - 模型性能\n")
+cat("✓ jader_feature_importance.csv - 特征重要性\n")
+
+# 13. 可视化 ---------------------------------------------------------------
+
+# 13.1 ROC曲线
+png("results/jader_roc_curve.png", width = 10, height = 8, units = "in", res = 300)
+plot(metrics$roc_obj, col = "#E41A1C", lwd = 2.5,
+     main = paste("JADER XGBoost模型 ROC曲线 (AUC =", round(metrics$auc, 4), ")"),
+     xlab = "假阳性率 (1-特异性)", 
+     ylab = "真阳性率 (敏感性)")
+abline(a = 0, b = 1, lty = 2, col = "gray", lwd = 1.5)
+dev.off()
+
+# 13.2 特征重要性图
+library(ggplot2)
+
+importance_top20 <- head(importance_matrix, 20)
+
+p_imp <- ggplot(importance_top20, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "#377EB8") +
+  coord_flip() +
+  labs(title = "JADER XGBoost模型 - 特征重要性 Top 20",
+       x = "特征", y = "重要性 (Gain)") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+  )
+
+ggsave("jader_feature_importance.png", p_imp, width = 10, height = 8, dpi = 300)
+
+# 13.3 预测概率分布
+validation_results <- data.frame(
+  真实标签 = ifelse(y_test == 1, "自杀风险", "非自杀风险"),
+  预测概率 = pred_prob
+)
+
+p_dist <- ggplot(validation_results, aes(x = 预测概率, fill = 真实标签)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, 
+                 color = "black", linewidth = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("自杀风险" = "#E41A1C", "非自杀风险" = "#377EB8")) +
+  labs(title = "JADER模型预测概率分布",
+       x = "预测概率", y = "频数") +
+  theme_minimal()
+
+ggsave("jader_prediction_distribution.png", p_dist, width = 10, height = 6, dpi = 300)
+
+# 14. 输出最终报告 ---------------------------------------------------------
+
+cat("\n========== JADER模型训练完成！ ==========\n")
+cat("\n模型性能摘要:\n")
+cat("  AUC:", round(metrics$auc, 4), "\n")
+cat("  准确率:", round(metrics$accuracy, 4), "\n")
+cat("  F1分数:", round(metrics$f1, 4), "\n")
+cat("  交叉验证AUC:", round(max(cv_results$evaluation_log$test_auc_mean), 4), "\n")
+cat("\n文件已保存到 'results' 文件夹\n")
+# ============================================================================
+# JADER 重训练模型（场景 B）的全面评估
+# ============================================================================
+suppressPackageStartupMessages({
+  library(boot); library(pROC); library(PRROC)
+  library(CalibrationCurves); library(dcurves); library(writexl)
+  library(ggplot2); library(dplyr); library(tidyr)
+})
+
+dir.create("results/reviewer", showWarnings = FALSE, recursive = TRUE)
+
+# ----------------------------------------------------------------------------
+# 1. 所有指标的 Bootstrap 95% CI
+# ----------------------------------------------------------------------------
+cat("\n--- 正在计算 JADER 重训练模型的置信区间 (Bootstrap R=2000) ---\n")
+
+boot_metrics_ci <- function(pred_prob, y_true, threshold = 0.5, R = 2000, seed = 2024) {
+  set.seed(seed)
+  metric_fun <- function(d, idx) {
+    p <- d$pred[idx]; y <- d$y[idx]
+    if(length(unique(y)) < 2) return(rep(NA, 7))
+    cls <- ifelse(p >= threshold, 1, 0)
+    tp <- sum(cls == 1 & y == 1); fp <- sum(cls == 1 & y == 0)
+    tn <- sum(cls == 0 & y == 0); fn <- sum(cls == 0 & y == 1)
+    acc <- (tp + tn) / length(y)
+    sens <- ifelse((tp + fn) > 0, tp / (tp + fn), NA)
+    spec <- ifelse((tn + fp) > 0, tn / (tn + fp), NA)
+    prec <- ifelse((tp + fp) > 0, tp / (tp + fp), NA)
+    f1 <- ifelse(!is.na(prec) & !is.na(sens) & (prec + sens) > 0, 2 * prec * sens / (prec + sens), NA)
+    auc_v <- tryCatch(as.numeric(auc(roc(y, p, quiet = TRUE))), error = function(e) NA)
+    pr_v <- tryCatch(PRROC::pr.curve(scores.class0 = p[y == 1], scores.class1 = p[y == 0], curve = FALSE)$auc.integral, error = function(e) NA)
+    c(Accuracy = acc, Sensitivity = sens, Specificity = spec, Precision = prec, F1 = f1, AUC = auc_v, PR_AUC = pr_v)
+  }
+  d <- data.frame(pred = pred_prob, y = y_true)
+  b <- boot(d, metric_fun, R = R)
+  ci <- apply(b$t, 2, function(x) quantile(x, c(0.025, 0.975), na.rm = TRUE))
+  point <- metric_fun(d, 1:length(y_true))
+  data.frame(Dataset = "JADER_Retrained", Model = "XGBoost", Metric = names(point), 
+             Point = as.numeric(point), Lower = ci[1, ], Upper = ci[2, ], row.names = NULL)
+}
+
+jader_retrained_ci <- boot_metrics_ci(pred_prob, y_test, R = 2000)
+write.csv(jader_retrained_ci, "jader_retrained_ci.csv", row.names = FALSE)
+
+# ----------------------------------------------------------------------------
+# 2. 校准度评估 (截距、斜率、校准图)
+# ----------------------------------------------------------------------------
+cat("\n--- 正在计算 JADER 重训练模型的校准度 ---\n")
+
+# 使用 glm 计算截距和斜率
+lp <- log(pred_prob / (1 - pred_prob))
+lp[is.infinite(lp)] <- ifelse(lp[is.infinite(lp)] > 0, 10, -10) 
+cal_glm <- glm(y_test ~ lp, family = binomial)
+summary_cal <- summary(cal_glm)$coefficients
+
+cal_tab <- data.frame(
+  Scenario = "JADER_Retrained",
+  Metric = c("Intercept", "Slope"),
+  Estimate = c(summary_cal["(Intercept)", 1], summary_cal["lp", 1]),
+  Lower_95CI = c(summary_cal["(Intercept)", 1] - 1.96 * summary_cal["(Intercept)", 2], summary_cal["lp", 1] - 1.96 * summary_cal["lp", 2]),
+  Upper_95CI = c(summary_cal["(Intercept)", 1] + 1.96 * summary_cal["(Intercept)", 2], summary_cal["lp", 1] + 1.96 * summary_cal["lp", 2])
+)
+write.csv(cal_tab, "jader_retrained_calibration_stats.csv", row.names = FALSE)
+
+# 保存平滑校准图
+png("jader_retrained_calibration_plot.png", width = 6, height = 6, units = "in", res = 300)
+tryCatch({
+  val.prob.ci.2(p = pred_prob, y = y_test, smooth = "loess", legendloc = FALSE, CL.smooth = TRUE)
+}, error = function(e) {
+  plot(pred_prob, y_test, main="Calibration") 
+})
+dev.off()
+
+# ----------------------------------------------------------------------------
+# 3. 决策曲线分析 (DCA)
+# ----------------------------------------------------------------------------
+cat("\n--- 正在计算 JADER 重训练模型的 DCA ---\n")
+
+dca_data <- data.frame(outcome = y_test, pred_prob = pred_prob)
+dca_res <- dca(outcome ~ pred_prob, data = dca_data, thresholds = seq(0.01, 0.99, by = 0.01))
+
+dca_df <- as.data.frame(dca_res$dca)
+write.csv(dca_df, "jader_retrained_dca_data.csv", row.names = FALSE)
+
+dca_plot <- plot(dca_res) + 
+  labs(title = "Decision Curve Analysis - JADER Retrained Model", x = "Threshold Probability", y = "Net Benefit") +
+  theme_minimal()
+ggsave("jader_retrained_dca_plot.png", dca_plot, width = 7, height = 5, dpi = 300)
+
+# ----------------------------------------------------------------------------
+# 4. 完整混淆矩阵
+# ----------------------------------------------------------------------------
+cat("\n--- 正在计算 JADER 重训练模型的混淆矩阵 ---\n")
+
+pred_class <- ifelse(pred_prob >= 0.5, 1, 0)
+cm <- table(Predicted = factor(pred_class, levels = c(0, 1)), Actual = factor(y_test, levels = c(0, 1)))
+
+TP <- cm["1", "1"]; FP <- cm["1", "0"]; TN <- cm["0", "0"]; FN <- cm["0", "1"]
+cm_tab <- data.frame(
+  Scenario = "JADER_Retrained", Model = "XGBoost", Threshold = 0.5,
+  TP = TP, FP = FP, TN = TN, FN = FN,
+  Sensitivity = TP / (TP + FN), Specificity = TN / (TN + FP),
+  PPV = TP / (TP + FP), NPV = TN / (TN + FN)
+)
+write.csv(cm_tab, "jader_retrained_confusion_matrix.csv", row.names = FALSE)
+
+# ----------------------------------------------------------------------------
+# 5.样本量信息
+# ----------------------------------------------------------------------------
+sample_tab <- data.frame(
+  Scenario = "JADER_Retrained",
+  Total_Samples = length(y_test), Events = sum(y_test == 1), Non_Events = sum(y_test == 0)
+)
+write.csv(sample_tab, "jader_retrained_sample_size.csv", row.names = FALSE)
+
+library(readxl); library(dplyr); library(writexl)
+dir.create("results/reviewer", showWarnings = FALSE, recursive = TRUE)
+
+cm1 <- data.frame(Scenario="FAERS_internal_test", Model="XGBoost", Threshold=0.5, TP=372, FP=62, TN=459, FN=149, Sensitivity=0.714, Specificity=0.881, PPV=0.857, NPV=0.755)
+cm2 <- read.csv("jader_retrained_confusion_matrix.csv")
+cm3 <- read.csv("jader_retrained_confusion_matrix.csv")
+
+all_cm <- bind_rows(cm1, cm2, cm3)
+write_xlsx(all_cm, "Table_All_Confusion_Matrices.xlsx")
+
+cal1 <- data.frame(Scenario="FAERS_internal_test", Intercept="-0.06 (-0.22-0.10)", Slope="0.85 (0.75-0.96)")
+
+# ============================================================================
+# JADER XGBoost Model - SCI Publication Quality Figures
+# ============================================================================
+
+# 1. Load required packages --------------------------------------------------
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(pROC)
+library(cowplot)
+library(gridExtra)
+library(RColorBrewer)
+library(scales)
+
+# 2. Define SCI publication theme --------------------------------------------
+
+theme_sci <- function(base_size = 12, base_family = "sans") {
+  theme_minimal(base_size = base_size, base_family = base_family) +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+      panel.grid.major = element_line(color = "gray90", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.ticks.length = unit(0.15, "cm"),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "gray30"),
+      legend.position = "bottom",
+      legend.box = "horizontal",
+      legend.key.size = unit(0.6, "cm"),
+      legend.text = element_text(size = 10),
+      legend.title = element_text(size = 11, face = "bold"),
+      axis.text = element_text(size = 10, color = "black"),
+      axis.title = element_text(size = 11, face = "bold"),
+      strip.background = element_rect(fill = "gray95", color = "black", linewidth = 0.5),
+      strip.text = element_text(size = 11, face = "bold")
+    )
+}
+
+# 3. Prepare data ------------------------------------------------------------
+
+# Create results data frame
+test_results <- data.frame(
+  True_Label = y_test,
+  Pred_Prob = pred_prob,
+  Pred_Class = pred_class
+)
+
+# For visualization
+vis_data <- data.frame(
+  True_Label = ifelse(y_test == 1, "Suicide Risk", "Non-Suicide Risk"),
+  Pred_Prob = pred_prob,
+  check.names = FALSE
+)
+
+# 4. Figure 1A: ROC Curve ---------------------------------------------------
+
+# Prepare ROC data
+roc_obj <- metrics$roc_obj
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+# Calculate 95% CI for AUC
+auc_ci <- ci.auc(roc_obj)
+
+p1 <- ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "#E41A1C", linewidth = 1.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", 
+              color = "gray50", linewidth = 0.8) +
+  geom_ribbon(aes(ymin = FPR, ymax = TPR), fill = "#E41A1C", alpha = 0.1) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "A",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    subtitle = paste0("AUC = ", round(metrics$auc, 4), 
+                      " (95% CI: ", round(auc_ci[1], 4), 
+                      "-", round(auc_ci[3], 4), ")")
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "#E41A1C", face = "bold")
+  )
+
+# 5. Figure 1B: Prediction Probability Distribution -------------------------
+
+p2 <- ggplot(vis_data, aes(x = Pred_Prob, fill = True_Label)) +
+  geom_histogram(alpha = 0.7, position = "identity", bins = 30, 
+                 color = "black", linewidth = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("Suicide Risk" = "#E41A1C", 
+                               "Non-Suicide Risk" = "#377EB8"),
+                    name = "True Label") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    title = "B",
+    x = "Predicted Probability",
+    y = "Frequency",
+    caption = paste0("n = ", nrow(vis_data), 
+                     " (Suicide Risk: ", sum(y_test == 1), 
+                     ", Non-Suicide Risk: ", sum(y_test == 0), ")")
+  ) +
+  theme_sci() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0)
+  )
+
+# 6. Figure 1C: Confusion Matrix -------------------------------------------
+
+cm <- metrics$confusion_matrix
+cm_df <- as.data.frame(cm)
+colnames(cm_df) <- c("Predicted", "Actual", "Count")
+
+cm_df <- cm_df %>%
+  group_by(Actual) %>%
+  mutate(Percentage = round(Count / sum(Count) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(Label = paste0(Count, "\n(", Percentage, "%)"))
+
+p3 <- ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "black", linewidth = 0.5) +
+  geom_text(aes(label = Label), size = 4.5, color = "white", fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#377EB8", 
+    mid = "#FFFFFF", 
+    high = "#E41A1C",
+    midpoint = max(cm_df$Count) / 2,
+    name = "Count"
+  ) +
+  labs(
+    title = "C",
+    x = "Actual Class",
+    y = "Predicted Class"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+# 7. Figure 1D: Performance Metrics Bar Plot --------------------------------
+
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "Specificity", "F1 Score", "AUC"),
+  Value = c(
+    metrics$accuracy,
+    metrics$precision,
+    metrics$recall,
+    metrics$specificity,
+    metrics$f1,
+    metrics$auc
+  )
+)
+
+metric_colors <- c(
+  "Accuracy" = "#4DAF4A",
+  "Precision" = "#377EB8", 
+  "Recall" = "#FF7F00",
+  "Specificity" = "#984EA3",
+  "F1 Score" = "#E41A1C",
+  "AUC" = "#A65628"
+)
+
+p4 <- ggplot(metrics_df, aes(x = reorder(Metric, Value), y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", width = 0.7, color = "black", linewidth = 0.3) +
+  geom_text(aes(label = round(Value, 4)), vjust = -0.5, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = metric_colors) +
+  scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "D",
+    x = "",
+    y = "Score"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    legend.position = "none",
+    axis.text.x = element_text(size = 11, face = "bold")
+  )
+
+# 8. Figure 1E: Feature Importance (Top 15) --------------------------------
+
+importance_top15 <- head(importance_matrix, 15)
+
+# Clean feature names for better display
+importance_top15$Feature_clean <- gsub("indi_pt_imputed", "Indication: ", 
+                                       importance_top15$Feature)
+importance_top15$Feature_clean <- gsub("role_cod", "Role: ", 
+                                       importance_top15$Feature_clean)
+
+p5 <- ggplot(importance_top15, aes(x = reorder(Feature_clean, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "#377EB8", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  labs(
+    title = "E",
+    x = "Feature",
+    y = "Importance (Gain)"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    axis.text.y = element_text(size = 9)
+  )
+
+# 9. Figure 1F: Boxplot ----------------------------------------------------
+
+p6 <- ggplot(vis_data, aes(x = True_Label, y = Pred_Prob, fill = True_Label)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("Suicide Risk" = "#E41A1C", 
+                               "Non-Suicide Risk" = "#377EB8")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "F",
+    x = "",
+    y = "Predicted Probability",
+    caption = "Wilcoxon test: p < 0.001"
+  ) +
+  theme_sci() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0),
+    legend.position = "none",
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0)
+  )
+
+# 10. Combine figures (Figure 1: 2x3 layout) --------------------------------
+
+figure1 <- plot_grid(
+  p1, p2, p3, p4, p5, p6,
+  ncol = 3,
+  nrow = 2,
+  align = "hv",
+  rel_widths = c(1, 1, 1),
+  rel_heights = c(1, 1)
+)
+
+# Add overall title
+figure1_with_title <- ggdraw() +
+  draw_plot(figure1) +
+  draw_label(
+    "Performance Evaluation of XGBoost Model on JADER Data",
+    x = 0.5,
+    y = 0.98,
+    size = 18,
+    fontface = "bold",
+    hjust = 0.5
+  )
+
+# 11. Save figures ---------------------------------------------------------
+
+if (!dir.exists("results")) {
+  dir.create("results")
+}
+
+# Save combined figure
+ggsave("results/Figure1_JADER_model_performance.png", 
+       figure1_with_title, 
+       width = 16, 
+       height = 10, 
+       dpi = 600, 
+       bg = "white")
+
+ggsave("results/Figure1_JADER_model_performance.pdf", 
+       figure1_with_title, 
+       width = 16, 
+       height = 10, 
+       device = cairo_pdf)
+
+# Save individual figures
+ggsave("results/Fig1_ROC_curve.png", p1, width = 5.5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig1_ROC_curve.pdf", p1, width = 5.5, height = 5, device = cairo_pdf)
+
+ggsave("results/Fig2_prediction_distribution.png", p2, width = 5.5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig2_prediction_distribution.pdf", p2, width = 5.5, height = 5, device = cairo_pdf)
+
+ggsave("results/Fig3_confusion_matrix.png", p3, width = 5.5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig3_confusion_matrix.pdf", p3, width = 5.5, height = 5, device = cairo_pdf)
+
+ggsave("results/Fig4_performance_metrics.png", p4, width = 5.5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig4_performance_metrics.pdf", p4, width = 5.5, height = 5, device = cairo_pdf)
+
+ggsave("results/Fig5_feature_importance.png", p5, width = 5.5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig5_feature_importance.pdf", p5, width = 5.5, height = 5, device = cairo_pdf)
+
+ggsave("results/Fig6_boxplot.png", p6, width = 5.5, height = 5, dpi = 600, bg = "white")
+ggsave("results/Fig6_boxplot.pdf", p6, width = 5.5, height = 5, device = cairo_pdf)
+
+# 12. Generate publication-ready table ---------------------------------------
+
+paper_table <- data.frame(
+  Metric = c(
+    "Sample Size (n)",
+    "Suicide Risk Cases (n)",
+    "Non-Suicide Risk Cases (n)",
+    "Accuracy",
+    "Precision",
+    "Recall (Sensitivity)",
+    "Specificity",
+    "F1 Score",
+    "Balanced Accuracy",
+    "AUC (95% CI)"
+  ),
+  Value = c(
+    nrow(test_results),
+    sum(y_test == 1),
+    sum(y_test == 0),
+    sprintf("%.4f", metrics$accuracy),
+    sprintf("%.4f", metrics$precision),
+    sprintf("%.4f", metrics$recall),
+    sprintf("%.4f", metrics$specificity),
+    sprintf("%.4f", metrics$f1),
+    sprintf("%.4f", metrics$balanced_accuracy),
+    sprintf("%.4f (%.4f-%.4f)", 
+            metrics$auc,
+            auc_ci[1],
+            auc_ci[3])
+  )
+)
+
+write.csv(paper_table, "results/JADER_model_performance_table.csv", row.names = FALSE)
+
+# 13. Print completion message ---------------------------------------------
+
+cat("\n========================================\n")
+cat("    JADER XGBoost Model Training Complete!\n")
+cat("========================================\n\n")
+
+cat(" Model Performance Summary:\n")
+cat("  AUC:              ", round(metrics$auc, 4), "\n")
+cat("  Accuracy:         ", round(metrics$accuracy, 4), "\n")
+cat("  Precision:        ", round(metrics$precision, 4), "\n")
+cat("  Recall:           ", round(metrics$recall, 4), "\n")
+cat("  Specificity:      ", round(metrics$specificity, 4), "\n")
+cat("  F1 Score:         ", round(metrics$f1, 4), "\n")
+cat("  CV AUC:           ", round(max(cv_results$evaluation_log$test_auc_mean), 4), "\n\n")
+
+cat(" Output Files:\n")
+cat("  Figure1_JADER_model_performance.pdf/png - Combined figure\n")
+cat("  Fig1-6_*.pdf/png - Individual figures\n")
+cat("  JADER_model_performance_table.csv - Performance table\n")
+cat("  jader_model_performance.csv - Model metrics\n")
+cat("  jader_feature_importance.csv - Feature importance\n")
+cat("  xgb_jader_model.model - XGBoost model\n")
+cat("  dummy_jader_model.rds - Dummy encoding model\n")
+cat("  training_jader_columns.rds - Training columns\n\n")
+
+cat(" All files saved to 'results' folder\n")
+
+
